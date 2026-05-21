@@ -6,7 +6,10 @@
       "Bash(node --check src/config/index.js)",
       "Bash(node --check src/middleware/verifySignature.js)",
       "Bash(node --check src/services/conversationService.js)",
-      "Bash(node --check src/services/claudeService.js)"
+      "Bash(node --check src/services/claudeService.js)",
+      "Bash(gh repo *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://github.com/xLuchi7/Bot_Mensajeria)"
     ]
   }
 }
