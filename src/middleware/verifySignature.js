@@ -1,33 +1,57 @@
 const crypto = require('crypto');
 const config = require('../config');
 
-// Attached to express.json({ verify }) to capture the raw body buffer
+// Attached to express.json({ verify }) to capture the raw body buffer before parsing
 function captureRawBody(req, _res, buf) {
   req.rawBody = buf;
 }
 
-// Validates x-hub-signature-256 sent by Meta on every POST webhook
 function validateMetaSignature(req, res, next) {
   const signature = req.headers['x-hub-signature-256'];
 
-  if (!signature || !config.meta.appSecret) {
+  if (!signature) {
+    console.error('[auth] REJECTED: missing x-hub-signature-256 header');
+    return res.sendStatus(403);
+  }
+
+  const secret = config.meta.appSecret?.trim();
+  if (!secret) {
+    console.error('[auth] REJECTED: META_APP_SECRET is not set in environment variables');
+    return res.sendStatus(403);
+  }
+
+  if (!req.rawBody || req.rawBody.length === 0) {
+    console.error('[auth] REJECTED: rawBody not captured — verify hook may not be running');
     return res.sendStatus(403);
   }
 
   const expected = crypto
-    .createHmac('sha256', config.meta.appSecret)
+    .createHmac('sha256', secret)
     .update(req.rawBody)
     .digest('hex');
 
-  const received = signature.replace('sha256=', '');
+  const received = signature.replace('sha256=', '').trim().toLowerCase();
 
+  if (received.length !== expected.length) {
+    console.error(
+      `[auth] REJECTED: signature length mismatch — received ${received.length} chars, expected ${expected.length}`
+    );
+    return res.sendStatus(403);
+  }
+
+  let valid = false;
   try {
-    const valid = crypto.timingSafeEqual(
+    valid = crypto.timingSafeEqual(
       Buffer.from(received, 'hex'),
       Buffer.from(expected, 'hex')
     );
-    if (!valid) return res.sendStatus(403);
-  } catch {
+  } catch (err) {
+    console.error('[auth] REJECTED: error comparing signatures —', err.message);
+    return res.sendStatus(403);
+  }
+
+  if (!valid) {
+    console.error('[auth] REJECTED: signature mismatch — META_APP_SECRET in Railway may be wrong');
     return res.sendStatus(403);
   }
 
