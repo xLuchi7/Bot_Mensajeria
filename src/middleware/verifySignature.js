@@ -25,6 +25,10 @@ function validateMetaSignature(req, res, next) {
     return res.sendStatus(403);
   }
 
+  // Diagnostic: log raw body to detect proxy modifications
+  const bodyStr = req.rawBody.toString('utf8');
+  console.log(`[auth] rawBody bytes=${req.rawBody.length} first100="${bodyStr.slice(0, 100)}"`);
+
   const expected = crypto
     .createHmac('sha256', secret)
     .update(req.rawBody)
@@ -55,7 +59,7 @@ function validateMetaSignature(req, res, next) {
       `[auth] REJECTED: signature mismatch\n` +
       `  received : ${received.slice(0, 8)}...${received.slice(-8)}\n` +
       `  expected : ${expected.slice(0, 8)}...${expected.slice(-8)}\n` +
-      `  secret used: starts="${secret.slice(0, 4)}" ends="${secret.slice(-4)}" len=${secret.length}`
+      `  secret   : starts="${secret.slice(0, 4)}" ends="${secret.slice(-4)}" len=${secret.length}`
     );
     return res.sendStatus(403);
   }
