@@ -44,8 +44,7 @@ index.js                          Entry point — Express setup, mounts /webhook
 src/
   config/index.js                 Single source of truth for all env vars
   routes/webhook.js               GET (verification) + POST (messages) routes
-  middleware/verifySignature.js   captureRawBody (express.json verify hook)
-                                  + validateMetaSignature (HMAC middleware)
+  middleware/verifySignature.js   validateMetaSignature (HMAC-SHA256 middleware)
   controllers/webhookController.js  Dispatches by platform object type
                                     (whatsapp_business_account / instagram / page)
   services/
@@ -57,10 +56,23 @@ src/
 ### Webhook flow
 
 1. Meta sends POST to `/webhook` with `x-hub-signature-256` header.
-2. `captureRawBody` stores the raw buffer; `validateMetaSignature` verifies HMAC-SHA256.
-3. Controller responds `200` immediately (Meta requires < 20 s), then processes async.
-4. `buildReply()` appends the user message to history, calls Claude, appends the assistant reply, and returns the text.
-5. `metaService` sends the reply via the appropriate Graph API endpoint.
+2. A scoped stream-reader middleware on `/webhook` captures raw bytes directly from the HTTP socket into `req.rawBody`, then manually parses JSON into `req.body`.
+3. `validateMetaSignature` verifies HMAC-SHA256 of `req.rawBody` against the header.
+4. Controller responds `200` immediately (Meta requires < 20 s), then processes async.
+5. `buildReply()` appends the user message to history, calls Claude, appends the assistant reply, and returns the text.
+6. `metaService` sends the reply via the appropriate Graph API endpoint.
+
+### Critical: middleware order in index.js
+
+The raw body capture for `/webhook` **must** be registered before any `express.json()` global middleware. `express.json()` consumes the request stream; if it runs first the raw bytes are gone and HMAC validation will always fail.
+
+```
+app.use('/webhook', rawStreamReader)   // 1st — captures req.rawBody
+app.use('/webhook', webhookRoutes)     // 2nd — routes with validateMetaSignature
+app.use(express.json())                // 3rd — for all other routes only
+```
+
+`express.raw({ type: 'application/json' })` was tried but caused the same mismatch — it applies globally and may transform the body before HMAC validation. The direct stream reader is the reliable solution.
 
 ### Conversation history
 
@@ -74,8 +86,7 @@ Stored in a `Map` in `conversationService.js`. The sliding window trims entries 
 
 ## Meta Webhook Registration
 
-- **Callback URL:** `https://<your-domain>/webhook`
+- **Callback URL:** `https://<your-domain>/webhook` or `/webhook/instagram`, `/webhook/whatsapp`, `/webhook/facebook`
 - **Verify token:** value of `META_VERIFY_TOKEN`
 - **Subscribed fields:** `messages` (WhatsApp), `messages` (Instagram), `messages` (Messenger)
-
-Use [ngrok](https://ngrok.com/) or a tunnel for local development: `ngrok http 3000`.
+- **App Secret:** from Meta App Dashboard → Settings → Basic → App Secret. Must match `META_APP_SECRET` exactly — regenerate and redeploy if there's any doubt.

@@ -5,23 +5,29 @@ const config = require('./src/config');
 
 const app = express();
 
-// express.raw captures the body as a raw Buffer (no parsing, no transformation).
-// A second middleware then stores it as req.rawBody and parses JSON manually.
-// This is more reliable than express.json({ verify }) for HMAC signature validation.
-app.use(express.raw({ type: 'application/json', limit: '5mb' }));
-app.use((req, _res, next) => {
-  if (Buffer.isBuffer(req.body)) {
-    req.rawBody = req.body;
-    try {
-      req.body = JSON.parse(req.rawBody.toString('utf8'));
-    } catch {
-      req.body = {};
+// ── PRIMERO: /webhook con captura de raw body directo del stream ──────────────
+// Lee los bytes del socket HTTP antes de que cualquier middleware los transforme.
+// express.json() global NO debe registrarse antes de esto.
+app.use('/webhook', (req, _res, next) => {
+  const chunks = [];
+  req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+  req.on('end', () => {
+    req.rawBody = Buffer.concat(chunks);
+    if (req.rawBody.length > 0) {
+      try {
+        req.body = JSON.parse(req.rawBody.toString('utf8'));
+      } catch {
+        req.body = {};
+      }
     }
-  }
-  next();
+    next();
+  });
+  req.on('error', next);
 });
-
 app.use('/webhook', webhookRoutes);
+
+// ── DESPUÉS: express.json() para el resto de rutas ───────────────────────────
+app.use(express.json());
 
 app.get('/', (_req, res) => {
   res.json({ status: 'ok', service: 'Bot Mensajeria' });
