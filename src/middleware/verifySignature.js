@@ -51,7 +51,12 @@ function validateMetaSignature(req, res, next) {
   }
 
   if (!valid) {
-    console.error('[auth] REJECTED: signature mismatch — META_APP_SECRET in Railway may be wrong');
+    console.error(
+      `[auth] REJECTED: signature mismatch\n` +
+      `  received : ${received.slice(0, 8)}...${received.slice(-8)}\n` +
+      `  expected : ${expected.slice(0, 8)}...${expected.slice(-8)}\n` +
+      `  secret used: starts="${secret.slice(0, 4)}" ends="${secret.slice(-4)}" len=${secret.length}`
+    );
     return res.sendStatus(403);
   }
 
