@@ -1,11 +1,6 @@
 const crypto = require('crypto');
 const config = require('../config');
 
-// Attached to express.json({ verify }) to capture the raw body buffer before parsing
-function captureRawBody(req, _res, buf) {
-  req.rawBody = buf;
-}
-
 function validateMetaSignature(req, res, next) {
   const signature = req.headers['x-hub-signature-256'];
 
@@ -21,11 +16,10 @@ function validateMetaSignature(req, res, next) {
   }
 
   if (!req.rawBody || req.rawBody.length === 0) {
-    console.error('[auth] REJECTED: rawBody not captured — verify hook may not be running');
+    console.error('[auth] REJECTED: rawBody not captured');
     return res.sendStatus(403);
   }
 
-  // Diagnostic: log raw body to detect proxy modifications
   const bodyStr = req.rawBody.toString('utf8');
   console.log(`[auth] rawBody bytes=${req.rawBody.length} first100="${bodyStr.slice(0, 100)}"`);
 
@@ -37,9 +31,7 @@ function validateMetaSignature(req, res, next) {
   const received = signature.replace('sha256=', '').trim().toLowerCase();
 
   if (received.length !== expected.length) {
-    console.error(
-      `[auth] REJECTED: signature length mismatch — received ${received.length} chars, expected ${expected.length}`
-    );
+    console.error(`[auth] REJECTED: signature length mismatch — received ${received.length} chars, expected ${expected.length}`);
     return res.sendStatus(403);
   }
 
@@ -67,4 +59,4 @@ function validateMetaSignature(req, res, next) {
   next();
 }
 
-module.exports = { captureRawBody, validateMetaSignature };
+module.exports = { validateMetaSignature };
