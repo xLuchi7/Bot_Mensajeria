@@ -74,6 +74,7 @@ async function processWhatsApp(entry) {
 }
 
 async function processInstagram(entry) {
+  const pageId = entry.id; // Instagram Business Account ID from webhook payload
   for (const messaging of entry.messaging || []) {
     const userId = messaging.sender?.id;
     const text = messaging.message?.text;
@@ -86,12 +87,13 @@ async function processInstagram(entry) {
 
     console.log(`[instagram] Message from ${userId}: "${text.slice(0, 60)}"`);
     const reply = await buildReply('instagram', userId, text);
-    await meta.sendInstagramMessage(userId, reply);
+    await meta.sendInstagramMessage(pageId, userId, reply);
     console.log(`[instagram] Reply sent to ${userId}`);
   }
 }
 
 async function processFacebook(entry) {
+  const pageId = entry.id; // Facebook Page ID from webhook payload
   for (const messaging of entry.messaging || []) {
     const userId = messaging.sender?.id;
     const text = messaging.message?.text;
@@ -104,7 +106,7 @@ async function processFacebook(entry) {
 
     console.log(`[facebook] Message from ${userId}: "${text.slice(0, 60)}"`);
     const reply = await buildReply('facebook', userId, text);
-    await meta.sendFacebookMessage(userId, reply);
+    await meta.sendFacebookMessage(pageId, userId, reply);
     console.log(`[facebook] Reply sent to ${userId}`);
   }
 }

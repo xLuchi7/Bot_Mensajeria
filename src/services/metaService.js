@@ -28,10 +28,10 @@ async function sendWhatsAppMessage(phoneNumberId, to, text) {
   }
 }
 
-async function sendInstagramMessage(recipientId, text) {
+async function sendInstagramMessage(pageId, recipientId, text) {
   try {
     await axios.post(
-      `${BASE}/me/messages`,
+      `${BASE}/${pageId}/messages`,
       { recipient: { id: recipientId }, message: { text } },
       { headers: { Authorization: `Bearer ${config.meta.instagramToken}` } }
     );
@@ -41,10 +41,10 @@ async function sendInstagramMessage(recipientId, text) {
   }
 }
 
-async function sendFacebookMessage(recipientId, text) {
+async function sendFacebookMessage(pageId, recipientId, text) {
   try {
     await axios.post(
-      `${BASE}/me/messages`,
+      `${BASE}/${pageId}/messages`,
       { recipient: { id: recipientId }, message: { text } },
       { headers: { Authorization: `Bearer ${config.meta.facebookToken}` } }
     );
