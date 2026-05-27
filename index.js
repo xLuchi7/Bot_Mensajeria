@@ -40,5 +40,6 @@ app.listen(config.port, () => {
   console.log(`[config] META_APP_SECRET: ${secret.length} chars | starts="${secret.slice(0, 4)}" ends="${secret.slice(-4)}"`);
   console.log(`[config] META_VERIFY_TOKEN: ${config.meta.verifyToken ? 'set' : 'NOT SET'}`);
   console.log(`[config] ANTHROPIC_API_KEY: ${config.anthropic.apiKey ? 'set' : 'NOT SET'}`);
-  console.log(`[config] INSTAGRAM_ACCESS_TOKEN: ${config.meta.instagramToken ? 'set' : 'NOT SET'}`);
+  const igToken = config.meta.instagramToken ?? '';
+  console.log(`[config] INSTAGRAM_ACCESS_TOKEN: ${igToken.length} chars | starts="${igToken.slice(0, 6)}" ends="${igToken.slice(-6)}" hasSpaces=${/\s/.test(igToken)}`);
 });
