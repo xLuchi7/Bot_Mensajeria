@@ -89,4 +89,4 @@ Stored in a `Map` in `conversationService.js`. The sliding window trims entries 
 - **Callback URL:** `https://<your-domain>/webhook` or `/webhook/instagram`, `/webhook/whatsapp`, `/webhook/facebook`
 - **Verify token:** value of `META_VERIFY_TOKEN`
 - **Subscribed fields:** `messages` (WhatsApp), `messages` (Instagram), `messages` (Messenger)
-- **App Secret:** from Meta App Dashboard → Settings → Basic → App Secret. Must match `META_APP_SECRET` exactly — regenerate and redeploy if there's any doubt.
+- **App Secret (Instagram):** the correct secret is **NOT** the main Meta App Secret (Settings → Basic). For Instagram webhooks, use the **Instagram App Secret**: Meta App Dashboard → Instagram → panel left → "Clave secreta de la app de Instagram". Using the wrong secret causes persistent HMAC `signature mismatch` errors even though the body and code are correct.

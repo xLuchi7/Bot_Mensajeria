@@ -2,26 +2,10 @@ const crypto = require('crypto');
 const config = require('../config');
 
 function validateMetaSignature(req, res, next) {
-  const sigHeader = req.headers['x-hub-signature-256'] ?? '(missing)';
+  const sigHeader = req.headers['x-hub-signature-256'];
   const secret    = config.meta.appSecret?.trim() ?? '';
 
-  // Log key headers to detect proxy interference (content-encoding, transfer-encoding)
-  console.log(`[auth] content-type     : ${req.headers['content-type'] ?? '(none)'}`);
-  console.log(`[auth] content-encoding : ${req.headers['content-encoding'] ?? '(none)'}`);
-  console.log(`[auth] transfer-encoding: ${req.headers['transfer-encoding'] ?? '(none)'}`);
-  console.log(`[auth] x-hub-sig-256    : ${sigHeader}`);
-  console.log(`[auth] secret           : len=${secret.length} starts="${secret.slice(0,4)}" ends="${secret.slice(-4)}"`);
-
-  if (!req.rawBody || req.rawBody.length === 0) {
-    console.error('[auth] REJECTED: rawBody is empty');
-    return res.sendStatus(403);
-  }
-
-  // Full body as base64 — copy this value to use with scripts/test-hmac.js
-  console.log(`[auth] rawBody bytes    : ${req.rawBody.length}`);
-  console.log(`[auth] bodyBase64       : ${req.rawBody.toString('base64')}`);
-
-  if (sigHeader === '(missing)') {
+  if (!sigHeader) {
     console.error('[auth] REJECTED: missing x-hub-signature-256 header');
     return res.sendStatus(403);
   }
@@ -31,16 +15,17 @@ function validateMetaSignature(req, res, next) {
     return res.sendStatus(403);
   }
 
+  if (!req.rawBody || req.rawBody.length === 0) {
+    console.error('[auth] REJECTED: rawBody is empty');
+    return res.sendStatus(403);
+  }
+
   const expected = crypto
     .createHmac('sha256', secret)
     .update(req.rawBody)
     .digest('hex');
 
   const received = sigHeader.replace('sha256=', '').trim().toLowerCase();
-
-  console.log(`[auth] received sig     : ${received}`);
-  console.log(`[auth] expected sig     : ${expected}`);
-  console.log(`[auth] match            : ${received === expected}`);
 
   if (received.length !== expected.length) {
     console.error('[auth] REJECTED: signature length mismatch');
@@ -59,11 +44,10 @@ function validateMetaSignature(req, res, next) {
   }
 
   if (!valid) {
-    console.error('[auth] REJECTED: signature mismatch');
+    console.error('[auth] REJECTED: signature mismatch — verify META_APP_SECRET in environment variables');
     return res.sendStatus(403);
   }
 
-  console.log('[auth] OK — signature valid');
   next();
 }
 
