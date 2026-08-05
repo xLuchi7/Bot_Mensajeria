@@ -6,7 +6,7 @@ module.exports = {
     whatsappToken: process.env.WHATSAPP_ACCESS_TOKEN,
     instagramToken: process.env.INSTAGRAM_ACCESS_TOKEN,
     facebookToken: process.env.FACEBOOK_ACCESS_TOKEN,
-    apiVersion: process.env.META_API_VERSION || 'v21.0',
+    apiVersion: process.env.META_API_VERSION || 'v25.0',
   },
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY,

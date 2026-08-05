@@ -9,6 +9,16 @@ function logApiError(platform, err) {
   console.error(`[${platform}] API error ${status}: ${data}`);
 }
 
+// Los números argentinos llegan en el webhook con un "9" extra tras el código de
+// país (549...), pero la Cloud API rechaza ese mismo formato como destinatario de
+// envío — hay que sacarle el 9 (54...) o el mensaje no sale.
+function normalizeArgentinaNumber(number) {
+  if (/^549\d{10}$/.test(number)) {
+    return '54' + number.slice(3);
+  }
+  return number;
+}
+
 async function sendWhatsAppMessage(phoneNumberId, to, text) {
   try {
     await axios.post(
@@ -16,7 +26,7 @@ async function sendWhatsAppMessage(phoneNumberId, to, text) {
       {
         messaging_product: 'whatsapp',
         recipient_type: 'individual',
-        to,
+        to: normalizeArgentinaNumber(to),
         type: 'text',
         text: { body: text },
       },
