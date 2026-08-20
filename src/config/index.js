@@ -6,7 +6,7 @@ module.exports = {
     whatsappToken: process.env.WHATSAPP_ACCESS_TOKEN,
     instagramToken: process.env.INSTAGRAM_ACCESS_TOKEN,
     facebookToken: process.env.FACEBOOK_ACCESS_TOKEN,
-    apiVersion: process.env.META_API_VERSION || 'v21.0',
+    apiVersion: process.env.META_API_VERSION || 'v25.0',
   },
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY,
@@ -18,5 +18,12 @@ module.exports = {
   },
   conversation: {
     maxHistory: parseInt(process.env.MAX_HISTORY || '20', 10),
+  },
+  db: {
+    server: process.env.DB_SERVER,
+    database: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    port: parseInt(process.env.DB_PORT || '1433', 10),
   },
 };

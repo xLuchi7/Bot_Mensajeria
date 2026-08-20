@@ -2,6 +2,7 @@ const config = require('../config');
 const conversation = require('../services/conversationService');
 const claude = require('../services/claudeService');
 const meta = require('../services/metaService');
+const cliente = require('../services/clienteService');
 
 // GET /webhook — Meta hub verification handshake
 function verify(req, res) {
@@ -54,6 +55,12 @@ async function processWhatsApp(entry) {
 
     const { metadata, messages = [] } = change.value || {};
     const phoneNumberId = metadata?.phone_number_id;
+    const clienteId = await cliente.resolveClienteIdByPhone(metadata?.display_phone_number);
+
+    if (!clienteId) {
+      console.error(`[whatsapp] No hay Cliente registrado para el número ${metadata?.display_phone_number} — se ignoran sus mensajes`);
+      continue;
+    }
 
     for (const msg of messages) {
       if (msg.type !== 'text') {
@@ -66,7 +73,7 @@ async function processWhatsApp(entry) {
       if (!text) continue;
 
       console.log(`[whatsapp] Message from ${userId}: "${text.slice(0, 60)}"`);
-      const reply = await buildReply('whatsapp', userId, text);
+      const reply = await buildReply(clienteId, 'whatsapp', userId, text);
       await meta.sendWhatsAppMessage(phoneNumberId, userId, reply);
       console.log(`[whatsapp] Reply sent to ${userId}`);
     }
@@ -74,57 +81,30 @@ async function processWhatsApp(entry) {
 }
 
 async function processInstagram(entry) {
-  const pageId = entry.id; // Instagram Business Account ID from webhook payload
-  for (const messaging of entry.messaging || []) {
-    const userId = messaging.sender?.id;
-    const text = messaging.message?.text;
-
-    if (!userId || !text) continue;
-    if (messaging.message?.is_echo) {
-      console.log('[instagram] Skipped echo message');
-      continue;
-    }
-
-    console.log(`[instagram] Message from ${userId}: "${text.slice(0, 60)}"`);
-    const reply = await buildReply('instagram', userId, text);
-    await meta.sendInstagramMessage(pageId, userId, reply);
-    console.log(`[instagram] Reply sent to ${userId}`);
-  }
+  // TODO: resolver ClienteId para Instagram (todavía no hay columna para mapear pageId -> Cliente)
+  console.warn('[instagram] Soporte multi-cliente pendiente — se ignoran los mensajes por ahora');
 }
 
 async function processFacebook(entry) {
-  const pageId = entry.id; // Facebook Page ID from webhook payload
-  for (const messaging of entry.messaging || []) {
-    const userId = messaging.sender?.id;
-    const text = messaging.message?.text;
-
-    if (!userId || !text) continue;
-    if (messaging.message?.is_echo) {
-      console.log('[facebook] Skipped echo message');
-      continue;
-    }
-
-    console.log(`[facebook] Message from ${userId}: "${text.slice(0, 60)}"`);
-    const reply = await buildReply('facebook', userId, text);
-    await meta.sendFacebookMessage(pageId, userId, reply);
-    console.log(`[facebook] Reply sent to ${userId}`);
-  }
+  // TODO: resolver ClienteId para Facebook (todavía no hay columna para mapear pageId -> Cliente)
+  console.warn('[facebook] Soporte multi-cliente pendiente — se ignoran los mensajes por ahora');
 }
 
 // ── Shared core ──────────────────────────────────────────────────────────────
 
-async function buildReply(platform, userId, text) {
-  conversation.addMessage(userId, 'user', text);
+async function buildReply(clienteId, platform, userId, text) {
+  await conversation.addMessage(clienteId, userId, 'user', text, platform);
 
   try {
-    console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${conversation.getHistory(userId).length} msgs)`);
-    const reply = await claude.generateResponse(conversation.getHistory(userId));
-    conversation.addMessage(userId, 'assistant', reply);
+    const history = await conversation.getHistory(clienteId, userId);
+    console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
+    const reply = await claude.generateResponse(history);
+    await conversation.addMessage(clienteId, userId, 'assistant', reply, platform);
     console.log(`[claude] Response for ${userId}: "${reply.slice(0, 80)}"`);
     return reply;
   } catch (err) {
     console.error(`[claude] API error for ${userId}:`, err.message);
-    conversation.clearHistory(userId);
+    await conversation.clearHistory(clienteId, userId);
     return 'Lo siento, ocurrió un error al procesar tu mensaje. Por favor intenta de nuevo.';
   }
 }

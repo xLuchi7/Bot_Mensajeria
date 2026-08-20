@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const webhookRoutes = require('./src/routes/webhook');
 const config = require('./src/config');
+const { getPool } = require('./src/services/db');
 
 const app = express();
 
@@ -42,4 +43,8 @@ app.listen(config.port, () => {
   console.log(`[config] ANTHROPIC_API_KEY: ${config.anthropic.apiKey ? 'set' : 'NOT SET'}`);
   const igToken = config.meta.instagramToken ?? '';
   console.log(`[config] INSTAGRAM_ACCESS_TOKEN: ${igToken.length} chars | starts="${igToken.slice(0, 6)}" ends="${igToken.slice(-6)}" hasSpaces=${/\s/.test(igToken)}`);
+
+  getPool()
+    .then(() => console.log(`[db] Connected to ${config.db.database} on ${config.db.server}`))
+    .catch(err => console.error(`[db] Connection failed:`, err.message));
 });

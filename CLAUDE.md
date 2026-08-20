@@ -12,6 +12,7 @@ Node.js/Express server that acts as a Meta webhook receiver and AI-powered messa
 - **Framework:** Express 5
 - **AI:** `@anthropic-ai/sdk` — Anthropic Claude
 - **HTTP client:** Axios — outbound calls to Meta Graph API
+- **Database:** Azure SQL (via `mssql`) — conversation history persistence
 - **Config:** dotenv
 
 ## Commands
@@ -36,6 +37,7 @@ Copy `.env.example` to `.env` and fill in all values before running. Key variabl
 | `SYSTEM_PROMPT` | Bot personality / instructions |
 | `CLAUDE_MODEL` | Model ID (default: `claude-sonnet-4-6`) |
 | `MAX_HISTORY` | Messages kept per user session (default: 20) |
+| `DB_SERVER` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_PORT` | Azure SQL connection for conversation history |
 
 ## Architecture
 
@@ -50,8 +52,12 @@ src/
   services/
     claudeService.js              Wraps client.messages.create with system prompt
     metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage
-    conversationService.js        In-memory Map<userId, Message[]> with sliding window
+    conversationService.js        Azure SQL-backed history (Mensajes table) with sliding window, scoped by ClienteId + UserId
+    clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
+    db.js                         mssql connection pool (singleton via getPool())
 ```
+
+Table creation scripts live outside the repo: `D:\Projects Prog\Queries\BotMensajeria\BotMensajeria.sql` (run manually in SSMS).
 
 ### Webhook flow
 
@@ -74,15 +80,26 @@ app.use(express.json())                // 3rd — for all other routes only
 
 `express.raw({ type: 'application/json' })` was tried but caused the same mismatch — it applies globally and may transform the body before HMAC validation. The direct stream reader is the reliable solution.
 
+### Multi-tenant model (Clientes)
+
+`Bot_Mensajeria` serves multiple business clients from one deployment — `Clientes` is *our* customers (e.g. a company using the bot), not the end users texting them. Each `Cliente` row has a `telefono` (their WhatsApp Business number, digits only, no `+`/spaces/dashes).
+
+On every inbound WhatsApp message, `clienteService.resolveClienteIdByPhone()` looks up the `Cliente` by matching `metadata.display_phone_number` from the webhook payload against `Clientes.telefono`. If no match is found, the message is logged and dropped — **adding a new client only requires inserting a row in `Clientes`, no code changes or redeploy.**
+
+Instagram and Facebook don't have this resolution wired up yet (`Clientes` has no page-ID column) — `processInstagram`/`processFacebook` currently just log and skip. WhatsApp is the only platform live for now; Instagram and Facebook are next.
+
 ### Conversation history
 
-Stored in a `Map` in `conversationService.js`. The sliding window trims entries older than `MAX_HISTORY`. This is in-memory only — data is lost on restart. Database persistence is a planned next step.
+Stored in Azure SQL, table `Mensajes`, scoped by `clienteId` + `userId`. `conversationService.js` inserts each message and deletes rows beyond the `MAX_HISTORY` window per (`clienteId`, `userId`) pair on every write, so the table never grows past the active window per conversation. `db.js` holds a single lazily-created `mssql` connection pool for the process.
+
+Azure SQL requires the connecting IP to be allow-listed in the server's firewall (Networking blade in the Azure portal). Since the bot runs on Railway (not Azure), the "Allow Azure services" toggle doesn't help — Railway's outbound IP (or an open range, if Railway has no static IP on the current plan) needs to be added explicitly.
 
 ### Adding a new platform
 
 1. Add its access token to `src/config/index.js` and `.env.example`.
 2. Add a `sendXxxMessage()` function to `metaService.js`.
 3. Add a `processXxx(entry)` handler in `webhookController.js` and dispatch on `object` value.
+4. Wire up `clienteId` resolution for that platform (extend `Clientes` with a platform-specific ID column and resolve it in `clienteService.js`, same pattern as WhatsApp's phone lookup).
 
 ## Meta Webhook Registration
 
