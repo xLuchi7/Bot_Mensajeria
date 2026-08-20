@@ -50,10 +50,11 @@ src/
   controllers/webhookController.js  Dispatches by platform object type
                                     (whatsapp_business_account / instagram / page)
   services/
-    claudeService.js              Wraps client.messages.create with system prompt
+    claudeService.js              Wraps client.messages.create with system prompt; runs the tool-use loop for buscar_articulos
     metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage
     conversationService.js        Azure SQL-backed history (Mensajes table) with sliding window, scoped by ClienteId + UserId
     clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
+    articuloService.js            Queries Articulos + Stock for a Cliente, used by the buscar_articulos tool
     db.js                         mssql connection pool (singleton via getPool())
 ```
 
@@ -91,6 +92,10 @@ Instagram and Facebook don't have this resolution wired up yet (`Clientes` has n
 ### Conversation history
 
 Stored in Azure SQL, table `Mensajes`, scoped by `clienteId` + `userId`. `conversationService.js` inserts each message and deletes rows beyond the `MAX_HISTORY` window per (`clienteId`, `userId`) pair on every write, so the table never grows past the active window per conversation. `db.js` holds a single lazily-created `mssql` connection pool for the process.
+
+### Product lookups (tool use)
+
+`claudeService.generateResponse(clienteId, messages)` runs an agentic loop (up to 5 turns) with the `buscar_articulos` tool defined inline. When Claude calls it, `articuloService.buscarArticulos()` does a `LIKE` search over `Articulos.nombre/descripcion/codigo` scoped to that `clienteId`, left-joined with `Stock`, and the JSON result is fed back as a `tool_result`. Tool-use turns are not persisted to `Mensajes` — only the final user message and final assistant text go into history — so each reply re-queries the catalog fresh rather than remembering past lookups.
 
 Azure SQL requires the connecting IP to be allow-listed in the server's firewall (Networking blade in the Azure portal). Since the bot runs on Railway (not Azure), the "Allow Azure services" toggle doesn't help — Railway's outbound IP (or an open range, if Railway has no static IP on the current plan) needs to be added explicitly.
 

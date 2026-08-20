@@ -98,7 +98,7 @@ async function buildReply(clienteId, platform, userId, text) {
   try {
     const history = await conversation.getHistory(clienteId, userId);
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const reply = await claude.generateResponse(history);
+    const reply = await claude.generateResponse(clienteId, history);
     await conversation.addMessage(clienteId, userId, 'assistant', reply, platform);
     console.log(`[claude] Response for ${userId}: "${reply.slice(0, 80)}"`);
     return reply;
