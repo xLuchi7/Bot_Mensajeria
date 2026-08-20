@@ -9,7 +9,11 @@
       "Bash(node --check src/services/claudeService.js)",
       "Bash(gh repo *)",
       "Bash(echo \"exit: $?\")",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://github.com/xLuchi7/Bot_Mensajeria)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://github.com/xLuchi7/Bot_Mensajeria)",
+      "Bash(node --check src/routes/webhook.js)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
     ]
   }
 }
