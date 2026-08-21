@@ -40,6 +40,8 @@ async function buildSystemPrompt(clienteId) {
 }
 
 async function ejecutarTool(clienteId, userId, block) {
+  console.log(`[claude] Tool call: ${block.name} — cliente=${clienteId} user=${userId} input=${JSON.stringify(block.input)}`);
+
   if (block.name === 'buscar_articulos') {
     try {
       const rows = await articulos.buscarArticulos(clienteId, block.input.texto);
