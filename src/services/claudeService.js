@@ -1,8 +1,12 @@
+const fs = require('fs');
+const path = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
 const config = require('../config');
 const articulos = require('./articuloService');
+const cliente = require('./clienteService');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
+const BASE_PROMPT = fs.readFileSync(path.join(__dirname, '../../prompts/base.txt'), 'utf8');
 
 const tools = [
   {
@@ -18,14 +22,25 @@ const tools = [
   },
 ];
 
-async function ejecutarTool(clienteId, block) {
+async function buildSystemPrompt(clienteId) {
+  const contexto = await cliente.getContextoNegocio(clienteId);
+  return contexto ? `${BASE_PROMPT}\n${contexto}` : BASE_PROMPT;
+}
+
+async function ejecutarTool(clienteId, userId, block) {
   if (block.name !== 'buscar_articulos') {
     return `Tool desconocida: ${block.name}`;
   }
 
   try {
     const rows = await articulos.buscarArticulos(clienteId, block.input.texto);
-    return rows.length ? JSON.stringify(rows) : 'No se encontraron artículos que coincidan.';
+    await articulos.registrarConsulta(clienteId, userId, block.input.texto, rows);
+
+    if (!rows.length) return 'No se encontraron artículos que coincidan.';
+
+    // No hace falta que Claude vea el id interno del artículo
+    const paraClaude = rows.map(({ articuloId, ...resto }) => resto);
+    return JSON.stringify(paraClaude);
   } catch (err) {
     return `Error al consultar el catálogo: ${err.message}`;
   }
@@ -33,11 +48,13 @@ async function ejecutarTool(clienteId, block) {
 
 /**
  * @param {number} clienteId
+ * @param {string} userId
  * @param {Array<{role: string, content: string}>} messages
  * @returns {Promise<{text: string, inputTokens: number, outputTokens: number}>}
  */
-async function generateResponse(clienteId, messages) {
+async function generateResponse(clienteId, userId, messages) {
   const conversationMessages = [...messages];
+  const systemPrompt = await buildSystemPrompt(clienteId);
   let inputTokens = 0;
   let outputTokens = 0;
 
@@ -45,7 +62,7 @@ async function generateResponse(clienteId, messages) {
     const response = await client.messages.create({
       model: config.anthropic.model,
       max_tokens: config.anthropic.maxTokens,
-      system: config.anthropic.systemPrompt,
+      system: systemPrompt,
       messages: conversationMessages,
       tools,
     });
@@ -66,7 +83,7 @@ async function generateResponse(clienteId, messages) {
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: await ejecutarTool(clienteId, block),
+        content: await ejecutarTool(clienteId, userId, block),
       });
     }
 

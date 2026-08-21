@@ -11,9 +11,6 @@ module.exports = {
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY,
     model: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
-    systemPrompt:
-      process.env.SYSTEM_PROMPT ||
-      'Eres un asistente útil, amigable y conciso. Responde siempre en el mismo idioma que el usuario.',
     maxTokens: parseInt(process.env.MAX_TOKENS || '1024', 10),
   },
   conversation: {

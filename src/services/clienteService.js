@@ -18,4 +18,14 @@ async function resolveClienteIdByPhone(phoneNumber) {
   return result.recordset[0]?.id ?? null;
 }
 
-module.exports = { resolveClienteIdByPhone };
+async function getContextoNegocio(clienteId) {
+  const pool = await getPool();
+  const result = await pool
+    .request()
+    .input('clienteId', sql.Int, clienteId)
+    .query('SELECT contextoNegocio FROM Clientes WHERE id = @clienteId');
+
+  return result.recordset[0]?.contextoNegocio ?? null;
+}
+
+module.exports = { resolveClienteIdByPhone, getContextoNegocio };

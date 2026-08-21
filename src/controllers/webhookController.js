@@ -98,14 +98,23 @@ async function buildReply(clienteId, platform, userId, text) {
   try {
     const history = await conversation.getHistory(clienteId, userId);
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const { text: reply, inputTokens, outputTokens } = await claude.generateResponse(clienteId, history);
-    await conversation.addMessage(clienteId, userId, 'assistant', reply, platform, { inputTokens, outputTokens });
+    const { text: reply, inputTokens, outputTokens } = await claude.generateResponse(clienteId, userId, history);
+    await conversation.addMessage(clienteId, userId, 'assistant', reply, platform, {
+      inputTokens,
+      outputTokens,
+      modelo: config.anthropic.model,
+    });
     console.log(`[claude] Response for ${userId}: "${reply.slice(0, 80)}" (tokens in=${inputTokens} out=${outputTokens})`);
     return reply;
   } catch (err) {
     console.error(`[claude] API error for ${userId}:`, err.message);
     await conversation.clearHistory(clienteId, userId);
-    return 'Lo siento, ocurrió un error al procesar tu mensaje. Por favor intenta de nuevo.';
+    const errorReply = 'Lo siento, ocurrió un error al procesar tu mensaje. Por favor intenta de nuevo.';
+    await conversation.addMessage(clienteId, userId, 'assistant', errorReply, platform, {
+      esError: true,
+      modelo: config.anthropic.model,
+    });
+    return errorReply;
   }
 }
 

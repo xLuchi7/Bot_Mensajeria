@@ -21,9 +21,9 @@ async function getHistory(clienteId, userId) {
   return result.recordset.map(({ role, content }) => ({ role, content }));
 }
 
-async function addMessage(clienteId, userId, role, content, platform, tokens = {}) {
+async function addMessage(clienteId, userId, role, content, platform, meta = {}) {
   const pool = await getPool();
-  const { inputTokens = null, outputTokens = null } = tokens;
+  const { inputTokens = null, outputTokens = null, esError = false, modelo = null } = meta;
 
   await pool
     .request()
@@ -34,9 +34,11 @@ async function addMessage(clienteId, userId, role, content, platform, tokens = {
     .input('content', sql.NVarChar(sql.MAX), content)
     .input('inputTokens', sql.Int, inputTokens)
     .input('outputTokens', sql.Int, outputTokens)
+    .input('esError', sql.Bit, esError)
+    .input('modelo', sql.NVarChar, modelo)
     .query(`
-      INSERT INTO Mensajes (clienteId, userId, platform, role, content, inputTokens, outputTokens)
-      VALUES (@clienteId, @userId, @platform, @role, @content, @inputTokens, @outputTokens)
+      INSERT INTO Mensajes (clienteId, userId, platform, role, content, inputTokens, outputTokens, esError, modelo)
+      VALUES (@clienteId, @userId, @platform, @role, @content, @inputTokens, @outputTokens, @esError, @modelo)
     `);
 
   // Recorta la ventana deslizante: solo se conservan los MAX_HISTORY más recientes

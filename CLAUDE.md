@@ -34,7 +34,6 @@ Copy `.env.example` to `.env` and fill in all values before running. Key variabl
 | `META_VERIFY_TOKEN` | Any string — must match what you enter in Meta dashboard |
 | `WHATSAPP_ACCESS_TOKEN` / `INSTAGRAM_ACCESS_TOKEN` / `FACEBOOK_ACCESS_TOKEN` | Per-platform Graph API tokens |
 | `ANTHROPIC_API_KEY` | Claude API key |
-| `SYSTEM_PROMPT` | Bot personality / instructions |
 | `CLAUDE_MODEL` | Model ID (default: `claude-sonnet-4-6`) |
 | `MAX_HISTORY` | Messages kept per user session (default: 20) |
 | `DB_SERVER` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_PORT` | Azure SQL connection for conversation history |
@@ -50,7 +49,7 @@ src/
   controllers/webhookController.js  Dispatches by platform object type
                                     (whatsapp_business_account / instagram / page)
   services/
-    claudeService.js              Wraps client.messages.create with system prompt; runs the tool-use loop for buscar_articulos
+    claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos
     metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage
     conversationService.js        Azure SQL-backed history (Mensajes table) with sliding window, scoped by ClienteId + UserId
     clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
@@ -95,7 +94,11 @@ Stored in Azure SQL, table `Mensajes`, scoped by `clienteId` + `userId`. `conver
 
 ### Product lookups (tool use)
 
-`claudeService.generateResponse(clienteId, messages)` runs an agentic loop (up to 5 turns) with the `buscar_articulos` tool defined inline. When Claude calls it, `articuloService.buscarArticulos()` does a `LIKE` search over `Articulos.nombre/descripcion/codigo` scoped to that `clienteId`, left-joined with `Stock`, and the JSON result is fed back as a `tool_result`. Tool-use turns are not persisted to `Mensajes` — only the final user message and final assistant text go into history — so each reply re-queries the catalog fresh rather than remembering past lookups.
+`claudeService.generateResponse(clienteId, userId, messages)` runs an agentic loop (up to 5 turns) with the `buscar_articulos` tool defined inline. When Claude calls it, `articuloService.buscarArticulos()` does a `LIKE` search over `Articulos.nombre/descripcion/codigo` scoped to that `clienteId`, left-joined with `Stock`, and the JSON result is fed back as a `tool_result`. Every lookup (found or not) is logged to `ConsultasArticulo` for demand analysis. Tool-use turns are not persisted to `Mensajes` — only the final user message and final assistant text go into history — so each reply re-queries the catalog fresh rather than remembering past lookups.
+
+### System prompt (base + per-Cliente context)
+
+The prompt is no longer a single env var. `prompts/base.txt` holds the general, versioned behavior (tone, WhatsApp formatting, how to interpret `buscar_articulos` results) and is shared by every Cliente. `claudeService.buildSystemPrompt()` appends `Clientes.contextoNegocio` (business name, hours, policies, etc.) to that base before each call — so onboarding a new client's personality is a DB update, not a redeploy.
 
 Azure SQL requires the connecting IP to be allow-listed in the server's firewall (Networking blade in the Azure portal). Since the bot runs on Railway (not Azure), the "Allow Azure services" toggle doesn't help — Railway's outbound IP (or an open range, if Railway has no static IP on the current plan) needs to be added explicitly.
 
