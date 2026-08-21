@@ -1,11 +1,18 @@
 const { getPool, sql } = require('./db');
 
+// Búsqueda naive de singular en español: "parlantes" -> "parlante", para que
+// matchee contra nombres guardados en singular vía LIKE.
+function singularizar(texto) {
+  const t = texto.trim();
+  return t.length > 3 && t.toLowerCase().endsWith('s') ? t.slice(0, -1) : t;
+}
+
 async function buscarArticulos(clienteId, texto) {
   const pool = await getPool();
   const result = await pool
     .request()
     .input('clienteId', sql.Int, clienteId)
-    .input('texto', sql.NVarChar, `%${texto}%`)
+    .input('texto', sql.NVarChar, `%${singularizar(texto)}%`)
     .query(`
       SELECT a.nombre, a.descripcion, a.precio, ISNULL(s.cantidad, 0) AS cantidad
       FROM Articulos a
