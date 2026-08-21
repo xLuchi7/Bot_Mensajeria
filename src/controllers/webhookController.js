@@ -3,6 +3,7 @@ const conversation = require('../services/conversationService');
 const claude = require('../services/claudeService');
 const meta = require('../services/metaService');
 const cliente = require('../services/clienteService');
+const dedupe = require('../services/dedupeService');
 
 // GET /webhook — Meta hub verification handshake
 function verify(req, res) {
@@ -65,6 +66,11 @@ async function processWhatsApp(entry) {
     for (const msg of messages) {
       if (msg.type !== 'text') {
         console.log(`[whatsapp] Ignored non-text message type: ${msg.type}`);
+        continue;
+      }
+
+      if (await dedupe.yaFueProcesado(msg.id)) {
+        console.log(`[whatsapp] Mensaje duplicado ignorado: ${msg.id}`);
         continue;
       }
 

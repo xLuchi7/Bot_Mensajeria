@@ -4,6 +4,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const config = require('../config');
 const articulos = require('./articuloService');
 const cliente = require('./clienteService');
+const escalamientos = require('./escalamientoService');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 const BASE_PROMPT = fs.readFileSync(path.join(__dirname, '../../prompts/base.txt'), 'utf8');
@@ -20,6 +21,17 @@ const tools = [
       required: ['texto'],
     },
   },
+  {
+    name: 'escalar_a_humano',
+    description: 'Llamala cuando el cliente necesite ayuda de una persona real del equipo: reclamos, devoluciones, problemas con un pedido, o cualquier cosa que no puedas resolver vos. Deja registro para que el equipo haga seguimiento; después avisale al cliente que alguien se va a poner en contacto, sin decir que sos un bot.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        motivo: { type: 'string', description: 'Breve resumen de por qué se escala, ej: "reclamo por producto dañado"' },
+      },
+      required: ['motivo'],
+    },
+  },
 ];
 
 async function buildSystemPrompt(clienteId) {
@@ -28,22 +40,31 @@ async function buildSystemPrompt(clienteId) {
 }
 
 async function ejecutarTool(clienteId, userId, block) {
-  if (block.name !== 'buscar_articulos') {
-    return `Tool desconocida: ${block.name}`;
+  if (block.name === 'buscar_articulos') {
+    try {
+      const rows = await articulos.buscarArticulos(clienteId, block.input.texto);
+      await articulos.registrarConsulta(clienteId, userId, block.input.texto, rows);
+
+      if (!rows.length) return 'No se encontraron artículos que coincidan.';
+
+      // No hace falta que Claude vea el id interno del artículo
+      const paraClaude = rows.map(({ articuloId, ...resto }) => resto);
+      return JSON.stringify(paraClaude);
+    } catch (err) {
+      return `Error al consultar el catálogo: ${err.message}`;
+    }
   }
 
-  try {
-    const rows = await articulos.buscarArticulos(clienteId, block.input.texto);
-    await articulos.registrarConsulta(clienteId, userId, block.input.texto, rows);
-
-    if (!rows.length) return 'No se encontraron artículos que coincidan.';
-
-    // No hace falta que Claude vea el id interno del artículo
-    const paraClaude = rows.map(({ articuloId, ...resto }) => resto);
-    return JSON.stringify(paraClaude);
-  } catch (err) {
-    return `Error al consultar el catálogo: ${err.message}`;
+  if (block.name === 'escalar_a_humano') {
+    try {
+      await escalamientos.registrarEscalamiento(clienteId, userId, block.input.motivo);
+      return 'Escalamiento registrado. Avisale al cliente que alguien del equipo se va a contactar pronto.';
+    } catch (err) {
+      return `Error al registrar el escalamiento: ${err.message}`;
+    }
   }
+
+  return `Tool desconocida: ${block.name}`;
 }
 
 /**

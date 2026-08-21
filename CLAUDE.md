@@ -49,11 +49,13 @@ src/
   controllers/webhookController.js  Dispatches by platform object type
                                     (whatsapp_business_account / instagram / page)
   services/
-    claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos
+    claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos / escalar_a_humano
     metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage
     conversationService.js        Azure SQL-backed history (Mensajes table) with sliding window, scoped by ClienteId + UserId
     clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
     articuloService.js            Queries Articulos + Stock for a Cliente, used by the buscar_articulos tool
+    escalamientoService.js        Logs cases the bot hands off to a human (Escalamientos table)
+    dedupeService.js              Claims each inbound WhatsApp message id so Meta's webhook retries don't get processed twice
     db.js                         mssql connection pool (singleton via getPool())
 ```
 
@@ -88,13 +90,22 @@ On every inbound WhatsApp message, `clienteService.resolveClienteIdByPhone()` lo
 
 Instagram and Facebook don't have this resolution wired up yet (`Clientes` has no page-ID column) — `processInstagram`/`processFacebook` currently just log and skip. WhatsApp is the only platform live for now; Instagram and Facebook are next.
 
+### Duplicate webhook deliveries
+
+Meta retries the webhook if it doesn't get a fast `200`, which would otherwise process (and reply to) the same inbound message twice. `dedupeService.yaFueProcesado()` tries to `INSERT` the WhatsApp message's `id` into `MensajesWhatsAppProcesados` (`UNIQUE` constraint); a unique-violation means it's a retry, so `processWhatsApp` skips it silently.
+
 ### Conversation history
 
 Stored in Azure SQL, table `Mensajes`, scoped by `clienteId` + `userId`. `conversationService.js` inserts each message and deletes rows beyond the `MAX_HISTORY` window per (`clienteId`, `userId`) pair on every write, so the table never grows past the active window per conversation. `db.js` holds a single lazily-created `mssql` connection pool for the process.
 
 ### Product lookups (tool use)
 
-`claudeService.generateResponse(clienteId, userId, messages)` runs an agentic loop (up to 5 turns) with the `buscar_articulos` tool defined inline. When Claude calls it, `articuloService.buscarArticulos()` does a `LIKE` search over `Articulos.nombre/descripcion/codigo` scoped to that `clienteId`, left-joined with `Stock`, and the JSON result is fed back as a `tool_result`. Every lookup (found or not) is logged to `ConsultasArticulo` for demand analysis. Tool-use turns are not persisted to `Mensajes` — only the final user message and final assistant text go into history — so each reply re-queries the catalog fresh rather than remembering past lookups.
+`claudeService.generateResponse(clienteId, userId, messages)` runs an agentic loop (up to 5 turns) with two tools defined inline:
+
+- `buscar_articulos` — `articuloService.buscarArticulos()` does a `LIKE` search over `Articulos.nombre/descripcion/codigo` scoped to that `clienteId`, left-joined with `Stock`. Every lookup (found or not) is logged to `ConsultasArticulo` for demand analysis.
+- `escalar_a_humano` — for complaints, returns, or anything outside the bot's scope. Logs to `Escalamientos` (`clienteId`, `userId`, `motivo`) so the business can follow up; the bot just tells the customer someone from the team will reach out.
+
+Tool-use turns are not persisted to `Mensajes` — only the final user message and final assistant text go into history — so each reply re-queries the catalog fresh rather than remembering past lookups.
 
 ### System prompt (base + per-Cliente context)
 
