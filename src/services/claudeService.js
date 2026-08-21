@@ -73,13 +73,14 @@ async function ejecutarTool(clienteId, userId, block) {
  * @param {number} clienteId
  * @param {string} userId
  * @param {Array<{role: string, content: string}>} messages
- * @returns {Promise<{text: string, inputTokens: number, outputTokens: number}>}
+ * @returns {Promise<{text: string, inputTokens: number, outputTokens: number, escalado: boolean}>}
  */
 async function generateResponse(clienteId, userId, messages) {
   const conversationMessages = [...messages];
   const systemPrompt = await buildSystemPrompt(clienteId);
   let inputTokens = 0;
   let outputTokens = 0;
+  let escalado = false;
 
   for (let i = 0; i < 5; i++) {
     const response = await client.messages.create({
@@ -95,7 +96,7 @@ async function generateResponse(clienteId, userId, messages) {
 
     if (response.stop_reason !== 'tool_use') {
       const text = response.content.find(block => block.type === 'text')?.text ?? '';
-      return { text, inputTokens, outputTokens };
+      return { text, inputTokens, outputTokens, escalado };
     }
 
     conversationMessages.push({ role: 'assistant', content: response.content });
@@ -103,6 +104,7 @@ async function generateResponse(clienteId, userId, messages) {
     const toolResults = [];
     for (const block of response.content) {
       if (block.type !== 'tool_use') continue;
+      if (block.name === 'escalar_a_humano') escalado = true;
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
@@ -113,7 +115,7 @@ async function generateResponse(clienteId, userId, messages) {
     conversationMessages.push({ role: 'user', content: toolResults });
   }
 
-  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', inputTokens, outputTokens };
+  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', inputTokens, outputTokens, escalado };
 }
 
 module.exports = { generateResponse };
