@@ -85,6 +85,7 @@ async function processWhatsApp(entry) {
       if (!text) continue;
 
       console.log(`[whatsapp] Message from ${userId}: "${text.slice(0, 60)}"`);
+      await meta.sendTypingIndicator(phoneNumberId, msg.id);
       const reply = await buildReply(clienteId, 'whatsapp', userId, text);
       await meta.sendWhatsAppMessage(phoneNumberId, userId, reply);
       console.log(`[whatsapp] Reply sent to ${userId}`);

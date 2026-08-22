@@ -19,6 +19,25 @@ function normalizeArgentinaNumber(number) {
   return number;
 }
 
+// Marca el mensaje entrante como leído y muestra "escribiendo..." en el chat del
+// usuario mientras armamos la respuesta (dura hasta 25s o hasta que mandemos el mensaje real).
+async function sendTypingIndicator(phoneNumberId, messageId) {
+  try {
+    await axios.post(
+      `${BASE}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId,
+        typing_indicator: { type: 'text' },
+      },
+      { headers: { Authorization: `Bearer ${config.meta.whatsappToken}` } }
+    );
+  } catch (err) {
+    logApiError('whatsapp', err);
+  }
+}
+
 async function sendWhatsAppMessage(phoneNumberId, to, text) {
   try {
     await axios.post(
@@ -64,4 +83,4 @@ async function sendFacebookMessage(pageId, recipientId, text) {
   }
 }
 
-module.exports = { sendWhatsAppMessage, sendInstagramMessage, sendFacebookMessage };
+module.exports = { sendTypingIndicator, sendWhatsAppMessage, sendInstagramMessage, sendFacebookMessage };
