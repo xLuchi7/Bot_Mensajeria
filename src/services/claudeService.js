@@ -5,6 +5,7 @@ const config = require('../config');
 const articulos = require('./articuloService');
 const cliente = require('./clienteService');
 const escalamientos = require('./escalamientoService');
+const pedidos = require('./pedidoService');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 const BASE_PROMPT = fs.readFileSync(path.join(__dirname, '../../prompts/base.txt'), 'utf8');
@@ -30,6 +31,29 @@ const tools = [
         motivo: { type: 'string', description: 'Breve resumen de por qué se escala, ej: "reclamo por producto dañado"' },
       },
       required: ['motivo'],
+    },
+  },
+  {
+    name: 'crear_pedido',
+    description: 'Crea un pedido en el sistema. Llamala ÚNICAMENTE después de que el cliente confirmó explícitamente que quiere el pedido (dijo que sí a tu resumen). Nunca la llames en el mismo mensaje donde recién le proponés el pedido — primero preguntá "¿confirmás el pedido por: ...?" en texto normal, y esperá la respuesta del cliente en su próximo mensaje antes de llamar esta tool.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          description: 'Artículos del pedido',
+          items: {
+            type: 'object',
+            properties: {
+              nombre: { type: 'string', description: 'Nombre exacto del artículo, tal como lo devolvió buscar_articulos' },
+              cantidad: { type: 'integer', minimum: 1 },
+            },
+            required: ['nombre', 'cantidad'],
+          },
+        },
+        notas: { type: 'string', description: 'Notas opcionales del pedido, ej: dirección de entrega si la mencionaron' },
+      },
+      required: ['items'],
     },
   },
 ];
@@ -66,6 +90,18 @@ async function ejecutarTool(clienteId, userId, block) {
     }
   }
 
+  if (block.name === 'crear_pedido') {
+    try {
+      const resultado = await pedidos.crearPedido(clienteId, userId, block.input.items, block.input.notas);
+      if (!resultado.ok) {
+        return `No se pudo crear el pedido:\n${resultado.errores.join('\n')}`;
+      }
+      return `Pedido #${resultado.pedidoId} creado con éxito. Total: $${resultado.total}.`;
+    } catch (err) {
+      return `Error al crear el pedido: ${err.message}`;
+    }
+  }
+
   return `Tool desconocida: ${block.name}`;
 }
 
@@ -73,7 +109,7 @@ async function ejecutarTool(clienteId, userId, block) {
  * @param {number} clienteId
  * @param {string} userId
  * @param {Array<{role: string, content: string}>} messages
- * @returns {Promise<{text: string, inputTokens: number, outputTokens: number, escalado: boolean}>}
+ * @returns {Promise<{text: string, inputTokens: number, outputTokens: number, escalado: boolean, pedidoCreado: boolean}>}
  */
 async function generateResponse(clienteId, userId, messages) {
   const conversationMessages = [...messages];
@@ -81,6 +117,7 @@ async function generateResponse(clienteId, userId, messages) {
   let inputTokens = 0;
   let outputTokens = 0;
   let escalado = false;
+  let pedidoCreado = false;
 
   for (let i = 0; i < 5; i++) {
     const response = await client.messages.create({
@@ -96,7 +133,7 @@ async function generateResponse(clienteId, userId, messages) {
 
     if (response.stop_reason !== 'tool_use') {
       const text = response.content.find(block => block.type === 'text')?.text ?? '';
-      return { text, inputTokens, outputTokens, escalado };
+      return { text, inputTokens, outputTokens, escalado, pedidoCreado };
     }
 
     conversationMessages.push({ role: 'assistant', content: response.content });
@@ -105,6 +142,7 @@ async function generateResponse(clienteId, userId, messages) {
     for (const block of response.content) {
       if (block.type !== 'tool_use') continue;
       if (block.name === 'escalar_a_humano') escalado = true;
+      if (block.name === 'crear_pedido') pedidoCreado = true;
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
@@ -115,7 +153,7 @@ async function generateResponse(clienteId, userId, messages) {
     conversationMessages.push({ role: 'user', content: toolResults });
   }
 
-  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', inputTokens, outputTokens, escalado };
+  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', inputTokens, outputTokens, escalado, pedidoCreado };
 }
 
 module.exports = { generateResponse };

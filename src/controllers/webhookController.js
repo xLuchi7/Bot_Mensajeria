@@ -11,6 +11,11 @@ const escalamientos = require('../services/escalamientoService');
 // más que un falso positivo ocasional.
 const PATRON_RECLAMO = /reclamo|reclam[oó]|devoluci[oó]n|se rompi[oó]|lleg[oó] roto|lleg[oó] da[ñn]ado|no recib[ií]|no me lleg[oó]|no lleg[oó] (el|mi) pedido|problema con (mi|el) (pedido|compra|producto)/i;
 
+// Igual idea que arriba pero para pedidos: acá NO auto-creamos nada (adivinar mal
+// qué compró alguien es peor que no detectarlo), solo dejamos un log visible para
+// revisar a mano y afinar el prompt si pasa seguido.
+const PATRON_PEDIDO_CONFIRMADO = /pedido.*(confirmad|cread|registrad|list[oa])|#\d+.*(pedido|total)/i;
+
 // GET /webhook — Meta hub verification handshake
 function verify(req, res) {
   const mode = req.query['hub.mode'];
@@ -111,7 +116,7 @@ async function buildReply(clienteId, platform, userId, text) {
   try {
     const history = await conversation.getHistory(clienteId, userId);
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const { text: reply, inputTokens, outputTokens, escalado } = await claude.generateResponse(clienteId, userId, history);
+    const { text: reply, inputTokens, outputTokens, escalado, pedidoCreado } = await claude.generateResponse(clienteId, userId, history);
     await conversation.addMessage(clienteId, userId, 'assistant', reply, platform, {
       inputTokens,
       outputTokens,
@@ -122,6 +127,10 @@ async function buildReply(clienteId, platform, userId, text) {
     if (!escalado && PATRON_RECLAMO.test(text)) {
       console.warn(`[escalamiento] Fallback disparado — Claude no llamó la tool pero el mensaje parece un reclamo: "${text.slice(0, 80)}"`);
       await escalamientos.registrarEscalamiento(clienteId, userId, `[Auto-detectado] "${text.slice(0, 200)}"`);
+    }
+
+    if (!pedidoCreado && PATRON_PEDIDO_CONFIRMADO.test(reply)) {
+      console.warn(`[pedido] Posible pedido "fantasma" — la respuesta suena a confirmación pero no se llamó crear_pedido: "${reply.slice(0, 80)}"`);
     }
 
     return reply;
