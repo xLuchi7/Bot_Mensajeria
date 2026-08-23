@@ -51,7 +51,7 @@ src/
   services/
     claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos / escalar_a_humano / crear_pedido
     metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage / sendTypingIndicator
-    conversationService.js        Azure SQL-backed history (Mensajes table) with sliding window, scoped by ClienteId + UserId
+    conversationService.js        Azure SQL-backed history (Mensajes table, never trimmed); getHistory() reads back only the last MAX_HISTORY rows
     clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
     articuloService.js            Queries Articulos + Stock for a Cliente, used by the buscar_articulos tool
     pedidoService.js              Validates stock and creates a Pedido + DetallePedidos transactionally, used by crear_pedido
@@ -97,7 +97,7 @@ Meta retries the webhook if it doesn't get a fast `200`, which would otherwise p
 
 ### Conversation history
 
-Stored in Azure SQL, table `Mensajes`, scoped by `clienteId` + `userId`. `conversationService.js` inserts each message and deletes rows beyond the `MAX_HISTORY` window per (`clienteId`, `userId`) pair on every write, so the table never grows past the active window per conversation. `db.js` holds a single lazily-created `mssql` connection pool for the process.
+Stored in Azure SQL, table `Mensajes`, scoped by `clienteId` + `userId`. Rows are never deleted on write — `Mensajes` is also the audit log the client Portal reads, so it has to keep everything. `getHistory()` limits what gets sent to Claude to the last `MAX_HISTORY` rows via `TOP (@max) ... ORDER BY id DESC`; that's a read-time limit, not a storage limit. (An earlier version also deleted older rows to bound table growth — that was removed once the Portal needed full history; it was silently destroying the audit trail it was supposed to be part of.) `db.js` holds a single lazily-created `mssql` connection pool for the process.
 
 ### Product lookups (tool use)
 

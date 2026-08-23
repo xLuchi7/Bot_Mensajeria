@@ -40,22 +40,6 @@ async function addMessage(clienteId, userId, role, content, platform, meta = {})
       INSERT INTO Mensajes (clienteId, userId, platform, role, content, inputTokens, outputTokens, esError, modelo)
       VALUES (@clienteId, @userId, @platform, @role, @content, @inputTokens, @outputTokens, @esError, @modelo)
     `);
-
-  // Recorta la ventana deslizante: solo se conservan los MAX_HISTORY más recientes
-  await pool
-    .request()
-    .input('clienteId', sql.Int, clienteId)
-    .input('userId', sql.NVarChar, userId)
-    .input('max', sql.Int, config.conversation.maxHistory)
-    .query(`
-      DELETE FROM Mensajes
-      WHERE clienteId = @clienteId AND userId = @userId
-        AND id NOT IN (
-          SELECT TOP (@max) id FROM Mensajes
-          WHERE clienteId = @clienteId AND userId = @userId
-          ORDER BY id DESC
-        )
-    `);
 }
 
 async function clearHistory(clienteId, userId) {
