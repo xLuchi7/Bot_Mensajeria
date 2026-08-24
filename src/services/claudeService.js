@@ -56,6 +56,15 @@ const tools = [
       required: ['items'],
     },
   },
+  {
+    name: 'buscar_pedidos_cliente',
+    description: 'Consulta los pedidos anteriores de ESTE cliente (el que te está escribiendo), con sus artículos, estado y fecha. Usala cuando alguien haga un reclamo o pregunte por un pedido y no te haya dado el número — así podés identificarlo por lo que describe (artículos, fecha) en vez de preguntar el número de una o de asumir cuál es. No sirve para pedidos de otros clientes.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
 ];
 
 async function buildSystemPrompt(clienteId) {
@@ -103,6 +112,15 @@ async function ejecutarTool(clienteId, userId, block) {
       return `Pedido #${resultado.pedidoId} creado con éxito. Total: $${resultado.total}.`;
     } catch (err) {
       return `Error al crear el pedido: ${err.message}`;
+    }
+  }
+
+  if (block.name === 'buscar_pedidos_cliente') {
+    try {
+      const rows = await pedidos.buscarPedidosCliente(clienteId, userId);
+      return rows.length ? JSON.stringify(rows) : 'Este cliente no tiene pedidos registrados.';
+    } catch (err) {
+      return `Error al consultar los pedidos: ${err.message}`;
     }
   }
 

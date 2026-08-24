@@ -82,4 +82,44 @@ async function crearPedido(clienteId, userId, items, notas) {
   }
 }
 
-module.exports = { crearPedido };
+// Pedidos anteriores de este cliente puntual (no de otros), para que Claude pueda
+// identificar a cuál se refiere un reclamo sin tener que confiar solo en lo que
+// recuerda de la conversación actual.
+async function buscarPedidosCliente(clienteId, userId) {
+  const pool = await getPool();
+  const result = await pool
+    .request()
+    .input('clienteId', sql.Int, clienteId)
+    .input('userId', sql.NVarChar, userId)
+    .query(`
+      SELECT p.id AS pedidoId, p.estado, p.total, FORMAT(p.fechaAlta, 'dd/MM/yyyy') AS fecha,
+             d.cantidad, a.nombre
+      FROM (
+        SELECT TOP (10) id, estado, total, fechaAlta
+        FROM Pedidos
+        WHERE clienteId = @clienteId AND userId = @userId
+        ORDER BY id DESC
+      ) p
+      JOIN DetallePedidos d ON d.pedidoId = p.id
+      JOIN Articulos a ON a.id = d.articuloId
+      ORDER BY p.id DESC
+    `);
+
+  const pedidos = new Map();
+  for (const row of result.recordset) {
+    if (!pedidos.has(row.pedidoId)) {
+      pedidos.set(row.pedidoId, {
+        pedidoId: row.pedidoId,
+        estado: row.estado,
+        total: row.total,
+        fecha: row.fecha,
+        items: [],
+      });
+    }
+    pedidos.get(row.pedidoId).items.push({ nombre: row.nombre, cantidad: row.cantidad });
+  }
+
+  return [...pedidos.values()];
+}
+
+module.exports = { crearPedido, buscarPedidosCliente };
