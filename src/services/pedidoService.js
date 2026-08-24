@@ -6,7 +6,7 @@ async function buscarArticuloExacto(pool, clienteId, nombre) {
     .input('clienteId', sql.Int, clienteId)
     .input('nombre', sql.NVarChar, nombre)
     .query(`
-      SELECT a.id AS articuloId, a.nombre, a.precio, ISNULL(s.cantidad, 0) AS stockDisponible
+      SELECT a.id AS articuloId, a.nombre, a.precio, a.usaStock, ISNULL(s.cantidad, 0) AS stockDisponible
       FROM Articulos a
       LEFT JOIN Stock s ON s.articuloId = a.id
       WHERE a.clienteId = @clienteId AND a.activo = 1 AND a.nombre = @nombre
@@ -34,7 +34,7 @@ async function crearPedido(clienteId, userId, items, notas) {
       errores.push(`No se encontró el artículo "${nombre}" en el catálogo.`);
       continue;
     }
-    if (articulo.stockDisponible < cantidad) {
+    if (articulo.usaStock && articulo.stockDisponible < cantidad) {
       errores.push(`No hay stock suficiente de "${articulo.nombre}" (pedido: ${cantidad}, disponible: ${articulo.stockDisponible}).`);
       continue;
     }

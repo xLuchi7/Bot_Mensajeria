@@ -14,7 +14,7 @@ async function buscarArticulos(clienteId, texto) {
     .input('clienteId', sql.Int, clienteId)
     .input('texto', sql.NVarChar, `%${singularizar(texto)}%`)
     .query(`
-      SELECT a.id AS articuloId, a.nombre, a.descripcion, a.precio, ISNULL(s.cantidad, 0) AS cantidad
+      SELECT a.id AS articuloId, a.nombre, a.descripcion, a.precio, a.usaStock, ISNULL(s.cantidad, 0) AS cantidad
       FROM Articulos a
       LEFT JOIN Stock s ON s.articuloId = a.id
       WHERE a.clienteId = @clienteId AND a.activo = 1

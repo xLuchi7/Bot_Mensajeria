@@ -13,7 +13,7 @@ const BASE_PROMPT = fs.readFileSync(path.join(__dirname, '../../prompts/base.txt
 const tools = [
   {
     name: 'buscar_articulos',
-    description: 'Busca artículos en el catálogo del cliente por nombre, descripción o código, e informa precio y stock disponible. Si "cantidad" es 0, el artículo existe pero está sin stock — avisá que está agotado, no digas que no existe en el catálogo.',
+    description: 'Busca artículos en el catálogo del cliente por nombre, descripción o código, e informa precio y disponibilidad. El campo "disponibilidad" te dice si hay stock (ej: "3 en stock", o "0 en stock" que significa agotado — avisá que está agotado, no digas que no existe en el catálogo) o si el artículo está siempre disponible sin control de stock (en ese caso podés ofrecerlo con normalidad, nunca digas que está agotado).',
     input_schema: {
       type: 'object',
       properties: {
@@ -73,8 +73,12 @@ async function ejecutarTool(clienteId, userId, block) {
 
       if (!rows.length) return 'No se encontraron artículos que coincidan.';
 
-      // No hace falta que Claude vea el id interno del artículo
-      const paraClaude = rows.map(({ articuloId, ...resto }) => resto);
+      // No hace falta que Claude vea el id interno ni los campos crudos de stock —
+      // le resumimos la disponibilidad en un solo campo legible.
+      const paraClaude = rows.map(({ articuloId, usaStock, cantidad, ...resto }) => ({
+        ...resto,
+        disponibilidad: usaStock ? `${cantidad} en stock` : 'siempre disponible (sin control de stock)',
+      }));
       return JSON.stringify(paraClaude);
     } catch (err) {
       return `Error al consultar el catálogo: ${err.message}`;
