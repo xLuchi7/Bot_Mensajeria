@@ -1,25 +1,33 @@
 const { getPool, sql } = require('./db');
 
-// Búsqueda naive de singular en español: "parlantes" -> "parlante", para que
-// matchee contra nombres guardados en singular vía LIKE.
-function singularizar(texto) {
-  const t = texto.trim();
-  return t.length > 3 && t.toLowerCase().endsWith('s') ? t.slice(0, -1) : t;
+// Búsqueda naive de singular en español: "parlantes" -> "parlante", palabra por
+// palabra (no la frase entera), para que "parlantes bluetooth" matchee bien
+// contra textos que tienen "Parlante" en singular.
+function singularizar(palabra) {
+  return palabra.length > 3 && palabra.toLowerCase().endsWith('s') ? palabra.slice(0, -1) : palabra;
 }
 
 async function buscarArticulos(clienteId, texto) {
   const pool = await getPool();
-  const result = await pool
-    .request()
-    .input('clienteId', sql.Int, clienteId)
-    .input('texto', sql.NVarChar, `%${singularizar(texto)}%`)
-    .query(`
-      SELECT a.id AS articuloId, a.nombre, a.descripcion, a.precio, a.usaStock, ISNULL(s.cantidad, 0) AS cantidad
-      FROM Articulos a
-      LEFT JOIN Stock s ON s.articuloId = a.id
-      WHERE a.clienteId = @clienteId AND a.activo = 1
-        AND (a.nombre LIKE @texto OR a.descripcion LIKE @texto OR a.codigo LIKE @texto)
-    `);
+  const palabras = texto.trim().split(/\s+/).filter(Boolean).map(singularizar);
+
+  const request = pool.request().input('clienteId', sql.Int, clienteId);
+  // Cada palabra tiene que aparecer en algún lado (nombre/descripcion/codigo),
+  // pero las palabras entre sí no tienen que estar en el mismo campo ni en orden.
+  const condiciones = palabras
+    .map((palabra, i) => {
+      request.input(`p${i}`, sql.NVarChar, `%${palabra}%`);
+      return `(a.nombre LIKE @p${i} OR a.descripcion LIKE @p${i} OR a.codigo LIKE @p${i})`;
+    })
+    .join(' AND ');
+
+  const result = await request.query(`
+    SELECT a.id AS articuloId, a.nombre, a.descripcion, a.precio, a.usaStock, ISNULL(s.cantidad, 0) AS cantidad
+    FROM Articulos a
+    LEFT JOIN Stock s ON s.articuloId = a.id
+    WHERE a.clienteId = @clienteId AND a.activo = 1
+      AND (${condiciones || '1=1'})
+  `);
 
   return result.recordset;
 }
