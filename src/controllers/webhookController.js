@@ -8,7 +8,10 @@ const escalamientos = require('../services/escalamientoService');
 
 // Red de seguridad: si el modelo no llama a la tool escalar_a_humano pero el
 // mensaje suena a reclamo, lo registramos igual — perder un reclamo real cuesta
-// más que un falso positivo ocasional.
+// más que un falso positivo ocasional. Se salta si Claude ya consultó
+// buscar_pedidos_cliente en esta respuesta: si miró los pedidos reales y decidió
+// no escalar, confiamos en esa decisión informada en vez de pisarla con el regex
+// (frases como "no me llegó" también valen para una simple consulta de estado).
 const PATRON_RECLAMO = /reclamo|reclam[oó]|devoluci[oó]n|se rompi[oó]|lleg[oó] roto|lleg[oó] da[ñn]ado|no recib[ií]|no me lleg[oó]|no lleg[oó] (el|mi) pedido|problema con (mi|el) (pedido|compra|producto)/i;
 
 // Igual idea que arriba pero para pedidos: acá NO auto-creamos nada (adivinar mal
@@ -116,7 +119,7 @@ async function buildReply(clienteId, platform, userId, text) {
   try {
     const history = await conversation.getHistory(clienteId, userId);
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const { text: reply, inputTokens, outputTokens, escalado, pedidoCreado } = await claude.generateResponse(clienteId, userId, history);
+    const { text: reply, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos } = await claude.generateResponse(clienteId, userId, history);
     await conversation.addMessage(clienteId, userId, 'assistant', reply, platform, {
       inputTokens,
       outputTokens,
@@ -124,7 +127,7 @@ async function buildReply(clienteId, platform, userId, text) {
     });
     console.log(`[claude] Response for ${userId}: "${reply.slice(0, 80)}" (tokens in=${inputTokens} out=${outputTokens})`);
 
-    if (!escalado && PATRON_RECLAMO.test(text)) {
+    if (!escalado && !consultoPedidos && PATRON_RECLAMO.test(text)) {
       console.warn(`[escalamiento] Fallback disparado — Claude no llamó la tool pero el mensaje parece un reclamo: "${text.slice(0, 80)}"`);
       await escalamientos.registrarEscalamiento(clienteId, userId, `[Auto-detectado] "${text.slice(0, 200)}"`);
     }

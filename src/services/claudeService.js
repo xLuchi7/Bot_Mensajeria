@@ -131,7 +131,7 @@ async function ejecutarTool(clienteId, userId, block) {
  * @param {number} clienteId
  * @param {string} userId
  * @param {Array<{role: string, content: string}>} messages
- * @returns {Promise<{text: string, inputTokens: number, outputTokens: number, escalado: boolean, pedidoCreado: boolean}>}
+ * @returns {Promise<{text: string, inputTokens: number, outputTokens: number, escalado: boolean, pedidoCreado: boolean, consultoPedidos: boolean}>}
  */
 async function generateResponse(clienteId, userId, messages) {
   const conversationMessages = [...messages];
@@ -140,6 +140,7 @@ async function generateResponse(clienteId, userId, messages) {
   let outputTokens = 0;
   let escalado = false;
   let pedidoCreado = false;
+  let consultoPedidos = false;
 
   for (let i = 0; i < 5; i++) {
     const response = await client.messages.create({
@@ -155,7 +156,7 @@ async function generateResponse(clienteId, userId, messages) {
 
     if (response.stop_reason !== 'tool_use') {
       const text = response.content.find(block => block.type === 'text')?.text ?? '';
-      return { text, inputTokens, outputTokens, escalado, pedidoCreado };
+      return { text, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos };
     }
 
     conversationMessages.push({ role: 'assistant', content: response.content });
@@ -165,6 +166,7 @@ async function generateResponse(clienteId, userId, messages) {
       if (block.type !== 'tool_use') continue;
       if (block.name === 'escalar_a_humano') escalado = true;
       if (block.name === 'crear_pedido') pedidoCreado = true;
+      if (block.name === 'buscar_pedidos_cliente') consultoPedidos = true;
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
@@ -175,7 +177,7 @@ async function generateResponse(clienteId, userId, messages) {
     conversationMessages.push({ role: 'user', content: toolResults });
   }
 
-  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', inputTokens, outputTokens, escalado, pedidoCreado };
+  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos };
 }
 
 module.exports = { generateResponse };
