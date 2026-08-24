@@ -49,12 +49,12 @@ src/
   controllers/webhookController.js  Dispatches by platform object type
                                     (whatsapp_business_account / instagram / page)
   services/
-    claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos / escalar_a_humano / crear_pedido
+    claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos / escalar_a_humano / crear_pedido / buscar_pedidos_cliente
     metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage / sendTypingIndicator
     conversationService.js        Azure SQL-backed history (Mensajes table, never trimmed); getHistory() reads back only the last MAX_HISTORY rows
     clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
-    articuloService.js            Queries Articulos + Stock for a Cliente, used by the buscar_articulos tool
-    pedidoService.js              Validates stock and creates a Pedido + DetallePedidos transactionally, used by crear_pedido
+    articuloService.js            Queries Articulos + Stock for a Cliente (buscar_articulos), logs every search to ConsultasArticulo
+    pedidoService.js              Validates stock and creates a Pedido + DetallePedidos transactionally (crear_pedido); buscarPedidosCliente + registrarConsultaPedido back buscar_pedidos_cliente, logging to ConsultasPedido
     escalamientoService.js        Logs cases the bot hands off to a human (Escalamientos table)
     dedupeService.js              Claims each inbound WhatsApp message id so Meta's webhook retries don't get processed twice
     db.js                         mssql connection pool (singleton via getPool())
@@ -101,19 +101,22 @@ Stored in Azure SQL, table `Mensajes`, scoped by `clienteId` + `userId`. Rows ar
 
 ### Product lookups (tool use)
 
-`claudeService.generateResponse(clienteId, userId, messages)` runs an agentic loop (up to 5 turns) with three tools defined inline:
+`claudeService.generateResponse(clienteId, userId, messages)` runs an agentic loop (up to 5 turns) with four tools defined inline:
 
-- `buscar_articulos` — `articuloService.buscarArticulos()` does a `LIKE` search over `Articulos.nombre/descripcion/codigo` scoped to that `clienteId`, left-joined with `Stock`. Every lookup (found or not) is logged to `ConsultasArticulo` for demand analysis.
+- `buscar_articulos` — `articuloService.buscarArticulos()` does a `LIKE` search over `Articulos.nombre/descripcion/codigo` scoped to that `clienteId`, left-joined with `Stock`. Every lookup (found or not) is logged to `ConsultasArticulo` for demand analysis, including a `stockAlConsultar` snapshot (NULL if the item doesn't use stock, or if nothing matched) so the Portal can surface "searched while out of stock" cases separately from a plain miss.
 - `escalar_a_humano` — for complaints, returns, or anything outside the bot's scope. Logs to `Escalamientos` (`clienteId`, `userId`, `motivo`) so the business can follow up; the bot just tells the customer someone from the team will reach out.
 - `crear_pedido` — see "Orders" below.
+- `buscar_pedidos_cliente` — `pedidoService.buscarPedidosCliente()` returns this specific end-customer's last 10 `Pedidos` with items, so Claude can answer status questions ("¿llegó mi pedido?") directly instead of escalating, and can identify which order a complaint refers to instead of guessing a `Pedido` number. Every call is logged to `ConsultasPedido` (one row per order returned, or one row with a NULL `pedidoId` if the customer has none) for the same "did we forget to follow up" review in the Portal.
 
 Tool-use turns are not persisted to `Mensajes` — only the final user message and final assistant text go into history — so each reply re-queries the catalog fresh rather than remembering past lookups.
+
+`ConsultasArticulo` and `ConsultasPedido` are unioned by a SQL view, `VConsultas` (`tipo` = `'articulo'`/`'pedido'`), so the Portal can list both kinds of consultas in one screen instead of building two separate pages.
 
 ### Orders (Pedidos)
 
 The prompt requires a two-step flow: Claude must summarize the order and ask for explicit confirmation in plain text first, and only call `crear_pedido` on the customer's next message once they confirm. `pedidoService.crearPedido()` re-resolves each item by exact `nombre` match (Claude never sees internal `articuloId`s), validates stock is sufficient for every line **without decrementing it** (stock adjustment is manual, left to the client via the future portal — some clients sell through other channels too, so auto-decrementing could desync), and inserts `Pedidos` + `DetallePedidos` inside a single transaction — if any line fails validation, nothing is created. `precioUnitario`/`subtotal` are snapshotted at order time so later price changes don't retroactively alter past orders.
 
-Neither `escalar_a_humano` nor `crear_pedido` are reliably called by the model just because the prompt says to — testing showed Claude will sometimes produce the confirmation-sounding text without invoking the tool, since nothing forces it the way missing catalog data forces `buscar_articulos`. `generateResponse()` returns `escalado`/`pedidoCreado` booleans reflecting whether each tool actually fired; `webhookController.buildReply()` cross-checks those against simple regexes over the message/reply text (`PATRON_RECLAMO`, `PATRON_PEDIDO_CONFIRMADO`). For escalations, a false negative auto-inserts an `[Auto-detectado]` row into `Escalamientos` (losing a real complaint is worse than a false positive). For orders, a mismatch only logs a `[pedido] Posible pedido "fantasma"` warning — auto-creating an order from a regex guess of which items/quantities were involved is worse than not creating one.
+Neither `escalar_a_humano` nor `crear_pedido` are reliably called by the model just because the prompt says to — testing showed Claude will sometimes produce the confirmation-sounding text without invoking the tool, since nothing forces it the way missing catalog data forces `buscar_articulos`. `generateResponse()` returns `escalado`/`pedidoCreado`/`consultoPedidos` booleans reflecting whether each tool actually fired; `webhookController.buildReply()` cross-checks those against simple regexes over the message/reply text (`PATRON_RECLAMO`, `PATRON_PEDIDO_CONFIRMADO`). For escalations, a false negative auto-inserts an `[Auto-detectado]` row into `Escalamientos` (losing a real complaint is worse than a false positive) — but only if `consultoPedidos` is also false, since `PATRON_RECLAMO` matches phrasing ("no me llegó") that's also valid for a plain status question Claude already answered correctly via `buscar_pedidos_cliente`; overriding that informed decision with the regex would create a duplicate, misleading `Escalamiento` for a case that wasn't actually a complaint. For orders, a mismatch only logs a `[pedido] Posible pedido "fantasma"` warning — auto-creating an order from a regex guess of which items/quantities were involved is worse than not creating one.
 
 ### System prompt (base + per-Cliente context)
 

@@ -122,4 +122,36 @@ async function buscarPedidosCliente(clienteId, userId) {
   return [...pedidos.values()];
 }
 
-module.exports = { crearPedido, buscarPedidosCliente };
+// Registra que este cliente consultó el estado de sus pedidos, para que el negocio pueda
+// revisar en el Portal si alguien preguntó y se olvidaron de hacer seguimiento. Un registro
+// por pedido encontrado (igual que registrarConsulta en articuloService); si no tiene
+// pedidos, un único registro con pedidoId NULL.
+async function registrarConsultaPedido(clienteId, userId, pedidosEncontrados) {
+  const pool = await getPool();
+
+  if (!pedidosEncontrados.length) {
+    await pool
+      .request()
+      .input('clienteId', sql.Int, clienteId)
+      .input('userId', sql.NVarChar, userId)
+      .query(`
+        INSERT INTO ConsultasPedido (clienteId, userId, pedidoId)
+        VALUES (@clienteId, @userId, NULL)
+      `);
+    return;
+  }
+
+  for (const p of pedidosEncontrados) {
+    await pool
+      .request()
+      .input('clienteId', sql.Int, clienteId)
+      .input('userId', sql.NVarChar, userId)
+      .input('pedidoId', sql.Int, p.pedidoId)
+      .query(`
+        INSERT INTO ConsultasPedido (clienteId, userId, pedidoId)
+        VALUES (@clienteId, @userId, @pedidoId)
+      `);
+  }
+}
+
+module.exports = { crearPedido, buscarPedidosCliente, registrarConsultaPedido };

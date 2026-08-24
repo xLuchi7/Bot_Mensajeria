@@ -33,6 +33,9 @@ async function buscarArticulos(clienteId, texto) {
 }
 
 // Registra qué se buscó y si hubo resultados, para poder analizar demanda de productos después.
+// stockAlConsultar guarda el stock que había en ese momento (NULL si el artículo no usa
+// stock, ya que "sin stock" no aplica) — así el Portal puede mostrar qué se buscó estando
+// agotado, para revisar cuando vuelva a haber.
 async function registrarConsulta(clienteId, userId, texto, rows) {
   const pool = await getPool();
 
@@ -43,8 +46,8 @@ async function registrarConsulta(clienteId, userId, texto, rows) {
       .input('userId', sql.NVarChar, userId)
       .input('texto', sql.NVarChar, texto)
       .query(`
-        INSERT INTO ConsultasArticulo (clienteId, userId, articuloId, textoBuscado, encontrado)
-        VALUES (@clienteId, @userId, NULL, @texto, 0)
+        INSERT INTO ConsultasArticulo (clienteId, userId, articuloId, textoBuscado, encontrado, stockAlConsultar)
+        VALUES (@clienteId, @userId, NULL, @texto, 0, NULL)
       `);
     return;
   }
@@ -56,9 +59,10 @@ async function registrarConsulta(clienteId, userId, texto, rows) {
       .input('userId', sql.NVarChar, userId)
       .input('texto', sql.NVarChar, texto)
       .input('articuloId', sql.Int, row.articuloId)
+      .input('stockAlConsultar', sql.Int, row.usaStock ? row.cantidad : null)
       .query(`
-        INSERT INTO ConsultasArticulo (clienteId, userId, articuloId, textoBuscado, encontrado)
-        VALUES (@clienteId, @userId, @articuloId, @texto, 1)
+        INSERT INTO ConsultasArticulo (clienteId, userId, articuloId, textoBuscado, encontrado, stockAlConsultar)
+        VALUES (@clienteId, @userId, @articuloId, @texto, 1, @stockAlConsultar)
       `);
   }
 }

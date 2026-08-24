@@ -118,6 +118,7 @@ async function ejecutarTool(clienteId, userId, block) {
   if (block.name === 'buscar_pedidos_cliente') {
     try {
       const rows = await pedidos.buscarPedidosCliente(clienteId, userId);
+      await pedidos.registrarConsultaPedido(clienteId, userId, rows);
       return rows.length ? JSON.stringify(rows) : 'Este cliente no tiene pedidos registrados.';
     } catch (err) {
       return `Error al consultar los pedidos: ${err.message}`;
