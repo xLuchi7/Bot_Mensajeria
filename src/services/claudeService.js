@@ -24,11 +24,12 @@ const tools = [
   },
   {
     name: 'escalar_a_humano',
-    description: 'Llamala cuando el cliente necesite ayuda de una persona real del equipo: reclamos, devoluciones, problemas con un pedido, o cualquier cosa que no puedas resolver vos. Deja registro para que el equipo haga seguimiento; después avisale al cliente que alguien se va a poner en contacto, sin decir que sos un bot.',
+    description: 'Llamala cuando el cliente necesite ayuda de una persona real del equipo: reclamos, devoluciones, problemas con un pedido, o cualquier cosa que no puedas resolver vos. Deja registro para que el equipo haga seguimiento; después avisale al cliente que alguien se va a poner en contacto, sin decir que sos un bot. Si el reclamo es sobre un pedido y lo identificaste con certeza (por ejemplo con buscar_pedidos_cliente), pasá también su pedidoId — eso lo marca como reclamado para que el equipo lo vea aparte. Si no estás seguro de cuál pedido es, dejá pedidoId sin completar (nunca lo inventes).',
     input_schema: {
       type: 'object',
       properties: {
         motivo: { type: 'string', description: 'Breve resumen de por qué se escala, ej: "reclamo por producto dañado"' },
+        pedidoId: { type: 'integer', description: 'Número del pedido al que se refiere el reclamo, SOLO si lo identificaste con certeza. Omitilo si no estás seguro.' },
       },
       required: ['motivo'],
     },
@@ -96,7 +97,9 @@ async function ejecutarTool(clienteId, userId, block) {
 
   if (block.name === 'escalar_a_humano') {
     try {
-      await escalamientos.registrarEscalamiento(clienteId, userId, block.input.motivo);
+      const { motivo, pedidoId } = block.input;
+      await escalamientos.registrarEscalamiento(clienteId, userId, motivo, pedidoId ?? null);
+      if (pedidoId) await pedidos.marcarComoReclamado(clienteId, pedidoId);
       return 'Escalamiento registrado. Avisale al cliente que alguien del equipo se va a contactar pronto.';
     } catch (err) {
       return `Error al registrar el escalamiento: ${err.message}`;

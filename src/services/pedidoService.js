@@ -154,4 +154,19 @@ async function registrarConsultaPedido(clienteId, userId, pedidosEncontrados) {
   }
 }
 
-module.exports = { crearPedido, buscarPedidosCliente, registrarConsultaPedido };
+// Si el pedido reclamado está "entregado", lo pasa a "reclamado" — el Portal solo
+// devuelve Stock al marcarlo "solucionado", y eso solo tiene sentido si el Stock ya
+// se había descontado (eso pasa recién al entregar). Si está en otro estado (ej.
+// todavía pendiente) no lo tocamos: no tiene sentido reclamar algo que ni se decidió
+// si se entrega.
+async function marcarComoReclamado(clienteId, pedidoId) {
+  const pool = await getPool();
+  const result = await pool
+    .request()
+    .input('clienteId', sql.Int, clienteId)
+    .input('pedidoId', sql.Int, pedidoId)
+    .query("UPDATE Pedidos SET estado = 'reclamado' WHERE id = @pedidoId AND clienteId = @clienteId AND estado = 'entregado'");
+  return result.rowsAffected[0] > 0;
+}
+
+module.exports = { crearPedido, buscarPedidosCliente, registrarConsultaPedido, marcarComoReclamado };
