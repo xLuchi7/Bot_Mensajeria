@@ -122,7 +122,7 @@ Neither `escalar_a_humano` nor `crear_pedido` are reliably called by the model j
 
 ### System prompt (base + per-Cliente context)
 
-The prompt is no longer a single env var. `prompts/base.txt` holds the general, versioned behavior (tone, WhatsApp formatting, how to interpret `buscar_articulos` results) and is shared by every Cliente. `claudeService.buildSystemPrompt()` appends `Clientes.contextoNegocio` (business name, hours, policies, etc.) to that base before each call — so onboarding a new client's personality is a DB update, not a redeploy.
+The prompt is no longer a single env var. `prompts/base.txt` holds the general, versioned behavior (tone, WhatsApp formatting, how to interpret `buscar_articulos` results) and is shared by every Cliente. `claudeService.buildSystemPrompt()` appends `Clientes.contextoNegocio` (business name, hours, policies, etc.) to that base before each call — so a client's personality is a DB update, not a redeploy. `Portal_Mensajeria` exposes this as a "Mi Negocio" page (free-text `<textarea>`) so each Cliente edits their own context directly instead of needing someone to run SQL.
 
 Azure SQL requires the connecting IP to be allow-listed in the server's firewall (Networking blade in the Azure portal). Since the bot runs on Railway (not Azure), the "Allow Azure services" toggle doesn't help — Railway's outbound IP (or an open range, if Railway has no static IP on the current plan) needs to be added explicitly.
 
