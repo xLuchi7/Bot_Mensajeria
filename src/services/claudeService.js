@@ -70,7 +70,12 @@ const tools = [
 
 async function buildSystemPrompt(clienteId) {
   const contexto = await cliente.getContextoNegocio(clienteId);
-  return contexto ? `${BASE_PROMPT}\n${contexto}` : BASE_PROMPT;
+  if (!contexto) return BASE_PROMPT;
+
+  return `${BASE_PROMPT}
+
+Información y preferencias de este negocio en particular. Si acá piden algo distinto a la sección "Estilo" de arriba (por ejemplo, usar emojis, un tono distinto, o terminar los mensajes de alguna forma en particular), priorizá lo que pidan acá por sobre esa sección. El resto de las instrucciones (catálogo, pedidos, escalamientos, etc.) siempre se respeta igual, esto no las cambia:
+${contexto}`;
 }
 
 async function ejecutarTool(clienteId, userId, block) {
