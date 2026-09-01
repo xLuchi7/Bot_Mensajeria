@@ -23,4 +23,8 @@ module.exports = {
     password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '1433', 10),
   },
+  email: {
+    gmailUser: process.env.GMAIL_USER,
+    gmailAppPassword: process.env.GMAIL_APP_PASSWORD,
+  },
 };

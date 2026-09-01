@@ -28,4 +28,14 @@ async function getContextoNegocio(clienteId) {
   return result.recordset[0]?.contextoNegocio ?? null;
 }
 
-module.exports = { resolveClienteIdByPhone, getContextoNegocio };
+async function getEmail(clienteId) {
+  const pool = await getPool();
+  const result = await pool
+    .request()
+    .input('clienteId', sql.Int, clienteId)
+    .query('SELECT email FROM Clientes WHERE id = @clienteId');
+
+  return result.recordset[0]?.email ?? null;
+}
+
+module.exports = { resolveClienteIdByPhone, getContextoNegocio, getEmail };

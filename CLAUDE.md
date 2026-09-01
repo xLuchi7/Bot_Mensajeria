@@ -34,9 +34,10 @@ Copy `.env.example` to `.env` and fill in all values before running. Key variabl
 | `META_VERIFY_TOKEN` | Any string — must match what you enter in Meta dashboard |
 | `WHATSAPP_ACCESS_TOKEN` / `INSTAGRAM_ACCESS_TOKEN` / `FACEBOOK_ACCESS_TOKEN` | Per-platform Graph API tokens |
 | `ANTHROPIC_API_KEY` | Claude API key |
-| `CLAUDE_MODEL` | Model ID (default: `claude-sonnet-4-6`) |
+| `CLAUDE_MODEL` | Model ID (default: `claude-sonnet-5`) |
 | `MAX_HISTORY` | Messages kept per user session (default: 20) |
 | `DB_SERVER` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_PORT` | Azure SQL connection for conversation history |
+| `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Gmail account + App Password used to email a Cliente when a Pedido is created |
 
 ## Architecture
 
@@ -56,6 +57,7 @@ src/
     articuloService.js            Queries Articulos + Stock for a Cliente (buscar_articulos), logs every search to ConsultasArticulo
     pedidoService.js              Validates stock and creates a Pedido + DetallePedidos transactionally (crear_pedido); buscarPedidosCliente + registrarConsultaPedido back buscar_pedidos_cliente, logging to ConsultasPedido
     escalamientoService.js        Logs cases the bot hands off to a human (Escalamientos table)
+    emailService.js               Emails the Cliente a summary when a Pedido is created (Gmail via nodemailer)
     dedupeService.js              Claims each inbound WhatsApp message id so Meta's webhook retries don't get processed twice
     db.js                         mssql connection pool (singleton via getPool())
 ```
@@ -117,6 +119,8 @@ Tool-use turns are not persisted to `Mensajes` — only the final user message a
 The prompt requires a two-step flow: Claude must summarize the order and ask for explicit confirmation in plain text first, and only call `crear_pedido` on the customer's next message once they confirm. `pedidoService.crearPedido()` re-resolves each item by exact `nombre` match (Claude never sees internal `articuloId`s), validates stock is sufficient for every line **without decrementing it** (stock adjustment is manual, left to the client via the future portal — some clients sell through other channels too, so auto-decrementing could desync), and inserts `Pedidos` + `DetallePedidos` inside a single transaction — if any line fails validation, nothing is created. `precioUnitario`/`subtotal` are snapshotted at order time so later price changes don't retroactively alter past orders.
 
 **State machine** (`Pedidos.estado`, enforced in `Portal_Mensajeria`'s `pedidoService.actualizarEstado()`): `pendiente` → `confirmado` → `entregado` | `cancelado` (both final under normal flow; stock is decremented only on the transition to `entregado`, never at creation). Outside that normal flow, this bot can flip an `entregado` order straight to `reclamado` (see `escalar_a_humano` above) — the Portal then only allows `reclamado` → `solucionado`, which reverses the stock decrement and auto-resolves any `Escalamientos` row with a matching `pedidoId`, and is itself final.
+
+**Email notification**: right after a successful `crear_pedido`, `emailService.enviarNotificacionPedido()` sends the Cliente (their `Clientes.email`, if set) a summary of the new order — fire-and-forget (not awaited), so a slow or failing send never delays or breaks the WhatsApp confirmation the customer already got. Uses Gmail via `nodemailer` with an App Password (`GMAIL_USER`/`GMAIL_APP_PASSWORD`) rather than a transactional provider — fine at current volume, but Gmail's sending limits and deliverability make it worth revisiting (e.g. Resend, which needs a verified sending domain the business doesn't have yet) if this scales up. With no `GMAIL_USER` configured, it logs a warning and no-ops instead of failing.
 
 Neither `escalar_a_humano` nor `crear_pedido` are reliably called by the model just because the prompt says to — testing showed Claude will sometimes produce the confirmation-sounding text without invoking the tool, since nothing forces it the way missing catalog data forces `buscar_articulos`. `generateResponse()` returns `escalado`/`pedidoCreado`/`consultoPedidos` booleans reflecting whether each tool actually fired; `webhookController.buildReply()` cross-checks those against simple regexes over the message/reply text (`PATRON_RECLAMO`, `PATRON_PEDIDO_CONFIRMADO`). For escalations, a false negative auto-inserts an `[Auto-detectado]` row into `Escalamientos` (losing a real complaint is worse than a false positive) — but only if `consultoPedidos` is also false, since `PATRON_RECLAMO` matches phrasing ("no me llegó") that's also valid for a plain status question Claude already answered correctly via `buscar_pedidos_cliente`; overriding that informed decision with the regex would create a duplicate, misleading `Escalamiento` for a case that wasn't actually a complaint. For orders, a mismatch only logs a `[pedido] Posible pedido "fantasma"` warning — auto-creating an order from a regex guess of which items/quantities were involved is worse than not creating one.
 

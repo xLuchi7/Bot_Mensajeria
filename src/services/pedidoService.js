@@ -20,7 +20,7 @@ async function buscarArticuloExacto(pool, clienteId, nombre) {
  * @param {string} userId
  * @param {Array<{nombre: string, cantidad: number}>} items
  * @param {string|null} notas
- * @returns {Promise<{ok: true, pedidoId: number, total: number} | {ok: false, errores: string[]}>}
+ * @returns {Promise<{ok: true, pedidoId: number, total: number, items: object[]} | {ok: false, errores: string[]}>}
  */
 async function crearPedido(clienteId, userId, items, notas) {
   const pool = await getPool();
@@ -75,7 +75,7 @@ async function crearPedido(clienteId, userId, items, notas) {
     }
 
     await transaction.commit();
-    return { ok: true, pedidoId, total };
+    return { ok: true, pedidoId, total, items: resueltos };
   } catch (err) {
     await transaction.rollback();
     throw err;

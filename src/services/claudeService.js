@@ -6,6 +6,7 @@ const articulos = require('./articuloService');
 const cliente = require('./clienteService');
 const escalamientos = require('./escalamientoService');
 const pedidos = require('./pedidoService');
+const email = require('./emailService');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 const BASE_PROMPT = fs.readFileSync(path.join(__dirname, '../../prompts/base.txt'), 'utf8');
@@ -117,6 +118,13 @@ async function ejecutarTool(clienteId, userId, block) {
       if (!resultado.ok) {
         return `No se pudo crear el pedido:\n${resultado.errores.join('\n')}`;
       }
+
+      // No se espera esta promesa: si el mail tarda o falla, no tiene que
+      // demorar ni romper la confirmación del pedido por WhatsApp.
+      cliente.getEmail(clienteId).then(clienteEmail => {
+        email.enviarNotificacionPedido(clienteEmail, resultado.pedidoId, resultado.items, resultado.total);
+      }).catch(err => console.error('[email] Error al buscar el email del Cliente:', err.message));
+
       return `Pedido #${resultado.pedidoId} creado con éxito. Total: $${resultado.total}.`;
     } catch (err) {
       return `Error al crear el pedido: ${err.message}`;
