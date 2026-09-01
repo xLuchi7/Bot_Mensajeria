@@ -58,6 +58,7 @@ async function enviarNotificacionPedido(email, pedidoId, items, total) {
       subject: `Nuevo pedido #${pedidoId}`,
       html,
     });
+    console.log(`[email] Notificación del pedido #${pedidoId} enviada a ${email}`);
   } catch (err) {
     console.error('[email] Error al enviar notificación de pedido:', err.message);
   }
