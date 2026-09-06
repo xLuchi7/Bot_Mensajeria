@@ -59,7 +59,7 @@ src/
     escalamientoService.js        Logs cases the bot hands off to a human (Escalamientos table)
     emailService.js               Emails the Cliente a summary when a Pedido is created (Gmail via nodemailer)
     dedupeService.js              Claims each inbound WhatsApp message id so Meta's webhook retries don't get processed twice
-    db.js                         mssql connection pool (singleton via getPool())
+    db.js                         mssql connection pool (singleton via getPool()); resets itself on connect failure or a dropped pool instead of caching a broken connection forever
 ```
 
 Table creation scripts live outside the repo: `D:\Projects Prog\Queries\BotMensajeria\BotMensajeria.sql` (run manually in SSMS).
