@@ -1,4 +1,5 @@
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const webhookRoutes = require('./src/routes/webhook');
 const config = require('./src/config');
@@ -32,6 +33,10 @@ app.use(express.json());
 
 app.get('/', (_req, res) => {
   res.json({ status: 'ok', service: 'Bot Mensajeria' });
+});
+
+app.get('/privacidad', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'privacidad.html'));
 });
 
 app.listen(config.port, () => {
