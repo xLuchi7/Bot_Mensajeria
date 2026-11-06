@@ -39,6 +39,10 @@ app.get('/privacidad', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'privacidad.html'));
 });
 
+app.get('/terminos', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'terminos.html'));
+});
+
 app.listen(config.port, () => {
   console.log(`Bot Mensajeria running on port ${config.port}`);
 
