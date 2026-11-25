@@ -68,13 +68,18 @@ async function processWhatsApp(entry) {
   for (const change of entry.changes || []) {
     if (change.field !== 'messages') continue;
 
-    const { metadata, messages = [] } = change.value || {};
+    const { metadata, messages = [], contacts = [] } = change.value || {};
     const phoneNumberId = metadata?.phone_number_id;
     const clienteId = await cliente.resolveClienteIdByPhone(metadata?.display_phone_number);
 
     if (!clienteId) {
       console.error(`[whatsapp] No hay Cliente registrado para el número ${metadata?.display_phone_number} — se ignoran sus mensajes`);
       continue;
+    }
+
+    if (messages.length) {
+      await cliente.guardarPhoneNumberId(clienteId, phoneNumberId).catch(err =>
+        console.error('[whatsapp] No se pudo guardar el phone_number_id:', err.message));
     }
 
     for (const msg of messages) {
@@ -93,8 +98,28 @@ async function processWhatsApp(entry) {
       if (!text) continue;
 
       console.log(`[whatsapp] Message from ${userId}: "${text.slice(0, 60)}"`);
+
+      // Bot apagado (general o para este chat): guardamos el mensaje igual para
+      // que el Cliente lo vea en el Portal, pero no llamamos a Claude ni respondemos.
+      const estadoBot = await cliente.botPuedeResponder(clienteId, userId);
+
+      // Nombre que la persona tiene en su perfil de WhatsApp (la API no da la foto
+      // ni cómo la tiene agendada el negocio). botPuedeResponder ya creó la fila en Chats.
+      const nombrePerfil = contacts.find(c => c.wa_id === userId)?.profile?.name;
+      if (nombrePerfil) {
+        await cliente.guardarNombrePerfil(clienteId, userId, nombrePerfil).catch(err =>
+          console.error('[whatsapp] No se pudo guardar el nombre de perfil:', err.message));
+      }
+
+      if (!estadoBot.puede) {
+        await conversation.addMessage(clienteId, userId, 'user', text, 'whatsapp');
+        console.log(`[whatsapp] Sin respuesta a ${userId}: ${estadoBot.motivo}`);
+        continue;
+      }
+
       await meta.sendTypingIndicator(phoneNumberId, msg.id);
       const reply = await buildReply(clienteId, 'whatsapp', userId, text);
+      if (reply === null) continue;
       await meta.sendWhatsAppMessage(phoneNumberId, userId, reply);
       console.log(`[whatsapp] Reply sent to ${userId}`);
     }
@@ -113,6 +138,16 @@ async function processFacebook(entry) {
 
 // ── Shared core ──────────────────────────────────────────────────────────────
 
+// Claude tarda unos segundos: si en ese rato apagaron el bot desde el Portal, la
+// respuesta (o el mensaje de error) se descarta en vez de mandarse.
+async function seApagoMientrasTanto(clienteId, userId) {
+  const estadoBot = await cliente.botPuedeResponder(clienteId, userId);
+  if (estadoBot.puede) return false;
+  console.log(`[claude] Respuesta descartada para ${userId}: ${estadoBot.motivo} mientras se generaba`);
+  return true;
+}
+
+// Devuelve el texto a enviar, o null si el bot se apagó mientras se generaba.
 async function buildReply(clienteId, platform, userId, text) {
   await conversation.addMessage(clienteId, userId, 'user', text, platform);
 
@@ -120,6 +155,7 @@ async function buildReply(clienteId, platform, userId, text) {
     const history = await conversation.getHistory(clienteId, userId);
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
     const { text: reply, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos } = await claude.generateResponse(clienteId, userId, history);
+    if (await seApagoMientrasTanto(clienteId, userId)) return null;
     await conversation.addMessage(clienteId, userId, 'assistant', reply, platform, {
       inputTokens,
       outputTokens,
@@ -138,8 +174,12 @@ async function buildReply(clienteId, platform, userId, text) {
 
     return reply;
   } catch (err) {
+    // Antes acá se borraba todo el historial del número (DELETE en Mensajes) para
+    // "resetear" la conversación, pero Mensajes es también el historial que ve el
+    // Portal y se perdía el chat entero. Ya no hace falta: getHistory() deja afuera
+    // los mensajes de error y arma un historial válido aunque haya filas raras.
     console.error(`[claude] API error for ${userId}:`, err.message);
-    await conversation.clearHistory(clienteId, userId);
+    if (await seApagoMientrasTanto(clienteId, userId)) return null;
     const errorReply = 'Lo siento, ocurrió un error al procesar tu mensaje. Por favor intenta de nuevo.';
     await conversation.addMessage(clienteId, userId, 'assistant', errorReply, platform, {
       esError: true,

@@ -31,6 +31,9 @@ app.use('/webhook', webhookRoutes);
 // ── DESPUÉS: express.json() para el resto de rutas ───────────────────────────
 app.use(express.json());
 
+// Endpoints para Portal_Mensajeria (mandar mensajes escritos a mano), con token compartido.
+app.use('/portal', require('./src/routes/portal'));
+
 app.get('/', (_req, res) => {
   res.json({ status: 'ok', service: 'Bot Mensajeria' });
 });

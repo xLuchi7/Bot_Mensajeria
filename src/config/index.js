@@ -23,6 +23,11 @@ module.exports = {
     password: process.env.DB_PASSWORD,
     port: parseInt(process.env.DB_PORT || '1433', 10),
   },
+  // Token compartido con Portal_Mensajeria (su BOT_API_TOKEN) para /portal/*.
+  // Sin esto configurado, el Portal no puede mandar mensajes.
+  portal: {
+    apiToken: process.env.PORTAL_API_TOKEN,
+  },
   email: {
     gmailUser: process.env.GMAIL_USER,
     gmailAppPassword: process.env.GMAIL_APP_PASSWORD,

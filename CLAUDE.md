@@ -38,6 +38,7 @@ Copy `.env.example` to `.env` and fill in all values before running. Key variabl
 | `MAX_HISTORY` | Messages kept per user session (default: 20) |
 | `DB_SERVER` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_PORT` | Azure SQL connection for conversation history |
 | `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Gmail account + App Password used to email a Cliente when a Pedido is created |
+| `PORTAL_API_TOKEN` | Shared secret for `/portal/*` (Portal_Mensajeria sends hand-written replies through `POST /portal/enviar`); must match the Portal's `BOT_API_TOKEN` |
 
 ## Architecture
 
@@ -62,7 +63,7 @@ src/
     db.js                         mssql connection pool (singleton via getPool()); resets itself on connect failure or a dropped pool instead of caching a broken connection forever
 ```
 
-Table creation scripts live outside the repo: `D:\Projects Prog\Queries\BotMensajeria\BotMensajeria.sql` (run manually in SSMS).
+SQL scripts live outside the repo: append every new script (idempotent, dated header, `GO` between blocks) to the end of `D:\SQL Scripts\Bot_Mensajeria.sql`, under `---------------CAMBIOS CLAUDE`. Never create `.sql` files in the repo or run DDL/DML against the database: the user runs it manually in SSMS. The database is shared with `../Portal_Mensajeria`.
 
 ### Webhook flow
 
