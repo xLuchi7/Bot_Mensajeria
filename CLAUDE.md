@@ -34,11 +34,14 @@ Copy `.env.example` to `.env` and fill in all values before running. Key variabl
 | `META_VERIFY_TOKEN` | Any string — must match what you enter in Meta dashboard |
 | `WHATSAPP_ACCESS_TOKEN` / `INSTAGRAM_ACCESS_TOKEN` / `FACEBOOK_ACCESS_TOKEN` | Per-platform Graph API tokens |
 | `ANTHROPIC_API_KEY` | Claude API key |
-| `CLAUDE_MODEL` | Model ID (default: `claude-sonnet-5`) |
+| `CLAUDE_MODEL` | Model ID (default: `claude-haiku-5-5`, the cheapest; Sonnet is ~20x more expensive) |
+| `CLAUDE_EFFORT` | `low` (default) / `medium` / `high` — Haiku 5.5 thinks by default; thinking counts against `MAX_TOKENS` (default 2048) |
+| `ALERTA_PLANTILLA` / `ALERTA_PLANTILLA_IDIOMA` | Optional Meta-approved template for the human-review alert when the alert number is outside the 24 h window (`{{1}}` customer number, `{{2}}` reason) |
 | `MAX_HISTORY` | Messages kept per user session (default: 20) |
 | `DB_SERVER` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_PORT` | Azure SQL connection for conversation history |
 | `GMAIL_USER` / `GMAIL_APP_PASSWORD` | Gmail account + App Password used to email a Cliente when a Pedido is created |
 | `PORTAL_API_TOKEN` | Shared secret for `/portal/*` (Portal_Mensajeria sends hand-written replies through `POST /portal/enviar`); must match the Portal's `BOT_API_TOKEN` |
+| `PORTAL_URL` | Optional, Portal base URL (no trailing `/`). `portalAvisoService.avisar()` posts to `{PORTAL_URL}/api/interno/eventos` (same token) after writing messages, escalations, orders or human-review flags, so the Portal updates live. Fire-and-forget: never blocks or breaks the bot |
 
 ## Architecture
 
@@ -60,10 +63,16 @@ src/
     escalamientoService.js        Logs cases the bot hands off to a human (Escalamientos table)
     emailService.js               Emails the Cliente a summary when a Pedido is created (Gmail via nodemailer)
     dedupeService.js              Claims each inbound WhatsApp message id so Meta's webhook retries don't get processed twice
+    revisionService.js            "Revisión humana": regex (asks for a person / insults) checked before Claude + tool pasar_a_revision_humana. Replies MENSAJE_ESPERA, pauses the chat (Chats.botActivo=0, revisionHumana=1), logs an Escalamiento and WhatsApps Clientes.telefonoAlertas
+    logService.js                 Logs table (shared with the Portal): buffered batch inserts, mirrors console.warn/error, purges rows older than 7 days
     db.js                         mssql connection pool (singleton via getPool()); resets itself on connect failure or a dropped pool instead of caching a broken connection forever
 ```
 
 SQL scripts live outside the repo: append every new script (idempotent, dated header, `GO` between blocks) to the end of `D:\SQL Scripts\Bot_Mensajeria.sql`, under `---------------CAMBIOS CLAUDE`. Never create `.sql` files in the repo or run DDL/DML against the database: the user runs it manually in SSMS. The database is shared with `../Portal_Mensajeria`.
+
+**All SQL lives in stored procedures** (`dbo.usp_Bot_*`, plus `dbo.usp_Logs_*` shared with the Portal), defined with `CREATE OR ALTER PROCEDURE` in that same script. Services never build SQL: they call `ejecutar('dbo.usp_...', { param: [sql.Type, value] })` from `src/services/db.js`. Multi-step writes use `SET XACT_ABORT ON` + `BEGIN TRY / BEGIN TRAN ... COMMIT` + `CATCH ROLLBACK; THROW`; lists go in as a JSON parameter read with `OPENJSON`. New dates are stored in Argentina time with `DATEADD(HOUR, -3, GETDATE())`; the older tables (`Mensajes`, `Pedidos`, `Escalamientos`, `Chats`) stay in UTC because the Portal converts them per `Clientes.zonaHoraria`.
+
+**Logs**: `logService` (`logs.info/warn/error/registrar`) batches into `usp_Logs_Insertar`; wrap work in `logs.conContexto({ clienteId, userId }, fn)` so everything logged inside (including `console.error`) gets those ids. Each Claude API call logs `claude_llamada` with model, tokens (incl. cache), `costoUsd` (prices in `src/config/precios.js` — add new models there) and duration.
 
 ### Webhook flow
 

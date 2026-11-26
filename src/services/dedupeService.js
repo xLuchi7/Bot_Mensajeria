@@ -1,21 +1,10 @@
-const { getPool, sql } = require('./db');
+const { ejecutar, sql } = require('./db');
 
-const SQL_UNIQUE_VIOLATION = [2627, 2601];
-
-// Intenta "reclamar" el id del mensaje de WhatsApp insertándolo. Si ya existe,
-// la violación de UNIQUE nos dice que ya se procesó (reintento de Meta).
+// "Reclama" el id del mensaje de WhatsApp: si ya estaba, es un reintento de Meta
+// (usp_Bot_WhatsAppMensajeReclamar devuelve yaProcesado = 1).
 async function yaFueProcesado(waMessageId) {
-  const pool = await getPool();
-  try {
-    await pool
-      .request()
-      .input('waMessageId', sql.NVarChar, waMessageId)
-      .query('INSERT INTO MensajesWhatsAppProcesados (waMessageId) VALUES (@waMessageId)');
-    return false;
-  } catch (err) {
-    if (SQL_UNIQUE_VIOLATION.includes(err.number)) return true;
-    throw err;
-  }
+  const result = await ejecutar('dbo.usp_Bot_WhatsAppMensajeReclamar', { waMessageId: [sql.NVarChar(100), waMessageId] });
+  return Boolean(result.recordset[0]?.yaProcesado);
 }
 
 module.exports = { yaFueProcesado };

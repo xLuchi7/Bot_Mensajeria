@@ -4,7 +4,7 @@ const config = require('../config');
 const meta = require('../services/metaService');
 const cliente = require('../services/clienteService');
 const conversation = require('../services/conversationService');
-const { getPool, sql } = require('../services/db');
+const logs = require('../services/logService');
 
 // Endpoints que usa Portal_Mensajeria. El token de WhatsApp vive solo acá: el
 // Portal no habla con Meta, le pide al bot que mande el mensaje.
@@ -25,7 +25,11 @@ function autorizado(req) {
 router.use((req, res, next) => {
   if (!config.portal.apiToken) return res.status(503).json({ ok: false, error: 'sin_configurar' });
   if (!autorizado(req)) return res.status(401).json({ ok: false, error: 'no_autorizado' });
-  next();
+  // Los logs de este pedido del Portal quedan con su Cliente, chat y usuario.
+  const clienteId = parseInt(req.body?.clienteId, 10) || null;
+  const userId = typeof req.body?.userId === 'string' ? req.body.userId : null;
+  const usuario = typeof req.body?.enviadoPor === 'string' ? req.body.enviadoPor : null;
+  logs.conContexto({ clienteId, userId, usuario }, next);
 });
 
 // POST /portal/enviar { clienteId, userId, texto, enviadoPor }
@@ -48,17 +52,7 @@ router.post('/enviar', async (req, res) => {
 
     // Solo se responde a chats que ya existen: el Portal no puede escribirle a
     // cualquier número. Y de paso se chequea la ventana de 24 h.
-    const pool = await getPool();
-    const chat = await pool
-      .request()
-      .input('clienteId', sql.Int, clienteId)
-      .input('userId', sql.NVarChar, userId)
-      .query(`
-        SELECT DATEDIFF(MINUTE, MAX(createdAt), SYSUTCDATETIME()) AS minutos
-        FROM Mensajes
-        WHERE clienteId = @clienteId AND userId = @userId AND role = 'user'
-      `);
-    const minutos = chat.recordset[0]?.minutos;
+    const minutos = await cliente.minutosDesdeCliente(clienteId, userId);
     if (minutos == null) return res.status(404).json({ ok: false, error: 'chat_inexistente' });
     if (minutos >= VENTANA_HORAS * 60) return res.status(409).json({ ok: false, error: 'fuera_de_ventana' });
 
@@ -73,6 +67,7 @@ router.post('/enviar', async (req, res) => {
 
     await conversation.addMessage(clienteId, userId, 'assistant', texto, 'whatsapp', { enviadoPor });
     console.log(`[portal] Mensaje manual enviado a ${userId} (cliente ${clienteId}) por ${enviadoPor || 'desconocido'}`);
+    logs.info('mensaje_manual_enviado', { clienteId, userId, usuario: enviadoPor, detalle: texto.slice(0, 1000) });
     res.json({ ok: true });
   } catch (err) {
     console.error('[portal] Error enviando mensaje manual:', err.message);
@@ -103,13 +98,7 @@ router.post('/plantilla', async (req, res) => {
     if (!datos.whatsappPhoneNumberId) return res.status(409).json({ ok: false, error: 'sin_numero' });
 
     // Igual que /enviar: solo a personas que ya le escribieron a este Cliente.
-    const pool = await getPool();
-    const chat = await pool
-      .request()
-      .input('clienteId', sql.Int, clienteId)
-      .input('userId', sql.NVarChar, userId)
-      .query("SELECT TOP 1 1 AS existe FROM Mensajes WHERE clienteId = @clienteId AND userId = @userId AND role = 'user'");
-    if (!chat.recordset.length) return res.status(404).json({ ok: false, error: 'chat_inexistente' });
+    if ((await cliente.minutosDesdeCliente(clienteId, userId)) == null) return res.status(404).json({ ok: false, error: 'chat_inexistente' });
 
     try {
       await meta.sendWhatsAppTemplate(datos.whatsappPhoneNumberId, userId, plantilla, idioma, parametros);
@@ -120,6 +109,7 @@ router.post('/plantilla', async (req, res) => {
 
     await conversation.addMessage(clienteId, userId, 'assistant', texto || `[Plantilla ${plantilla}]`, 'whatsapp', { enviadoPor });
     console.log(`[portal] Plantilla ${plantilla} enviada a ${userId} (cliente ${clienteId})`);
+    logs.info('plantilla_enviada', { clienteId, userId, usuario: enviadoPor, detalle: { plantilla, texto: texto.slice(0, 1000) } });
     res.json({ ok: true });
   } catch (err) {
     console.error('[portal] Error enviando plantilla:', err.message);

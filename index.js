@@ -4,6 +4,11 @@ const express = require('express');
 const webhookRoutes = require('./src/routes/webhook');
 const config = require('./src/config');
 const { getPool } = require('./src/services/db');
+const logs = require('./src/services/logService');
+
+// Tabla Logs: eventos del bot + todo console.warn/error. Se purga sola a los 7 días.
+logs.iniciar();
+logs.info('bot_iniciado', { detalle: { modelo: config.anthropic.model, effort: config.anthropic.effort } });
 
 const app = express();
 

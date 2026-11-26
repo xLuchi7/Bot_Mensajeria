@@ -1,4 +1,4 @@
-const { getPool, sql } = require('./db');
+const { ejecutar, sql } = require('./db');
 
 // Búsqueda naive de singular en español: "parlantes" -> "parlante", palabra por
 // palabra (no la frase entera), para que "parlantes bluetooth" matchee bien
@@ -7,30 +7,15 @@ function singularizar(palabra) {
   return palabra.length > 3 && palabra.toLowerCase().endsWith('s') ? palabra.slice(0, -1) : palabra;
 }
 
+// Cada palabra tiene que aparecer en algún lado (nombre, descripción, código,
+// marca, tipo, categoría, etiquetas o colecciones), pero las palabras entre sí
+// no tienen que estar en el mismo campo ni en orden (usp_Bot_ArticulosBuscar).
 async function buscarArticulos(clienteId, texto) {
-  const pool = await getPool();
   const palabras = texto.trim().split(/\s+/).filter(Boolean).map(singularizar);
-
-  const request = pool.request().input('clienteId', sql.Int, clienteId);
-  // Cada palabra tiene que aparecer en algún lado (nombre, descripción, código,
-  // marca, tipo, categoría, etiquetas o colecciones), pero las palabras entre sí
-  // no tienen que estar en el mismo campo ni en orden.
-  const condiciones = palabras
-    .map((palabra, i) => {
-      request.input(`p${i}`, sql.NVarChar, `%${palabra}%`);
-      return `(a.nombre LIKE @p${i} OR a.descripcion LIKE @p${i} OR a.codigo LIKE @p${i} OR a.marca LIKE @p${i}
-        OR a.tipoProducto LIKE @p${i} OR a.categoria LIKE @p${i} OR a.etiquetas LIKE @p${i} OR a.colecciones LIKE @p${i})`;
-    })
-    .join(' AND ');
-
-  const result = await request.query(`
-    SELECT a.id AS articuloId, a.nombre, a.descripcion, a.precio, a.precioComparacion, a.marca, a.opciones,
-           a.usaStock, ISNULL(s.cantidad, 0) AS cantidad, a.imagenes
-    FROM Articulos a
-    LEFT JOIN Stock s ON s.articuloId = a.id
-    WHERE a.clienteId = @clienteId AND a.activo = 1
-      AND (${condiciones || '1=1'})
-  `);
+  const result = await ejecutar('dbo.usp_Bot_ArticulosBuscar', {
+    clienteId: [sql.Int, clienteId],
+    palabras: [sql.NVarChar(sql.MAX), JSON.stringify(palabras)],
+  });
 
   return result.recordset.map(({ imagenes, opciones, ...row }) => ({
     ...row,
@@ -62,49 +47,25 @@ function parsearImagenes(valor) {
 
 // Mismo criterio que crear_pedido: nombre exacto y activo.
 async function obtenerFotos(clienteId, nombre) {
-  const pool = await getPool();
-  const result = await pool
-    .request()
-    .input('clienteId', sql.Int, clienteId)
-    .input('nombre', sql.NVarChar, nombre)
-    .query('SELECT TOP 1 nombre, imagenes FROM Articulos WHERE clienteId = @clienteId AND nombre = @nombre AND activo = 1');
+  const result = await ejecutar('dbo.usp_Bot_ArticuloFotos', {
+    clienteId: [sql.Int, clienteId],
+    nombre: [sql.NVarChar(200), String(nombre).slice(0, 200)],
+  });
   const row = result.recordset[0];
   return row ? { nombre: row.nombre, imagenes: parsearImagenes(row.imagenes) } : null;
 }
 
 // Registra qué se buscó y si hubo resultados, para poder analizar demanda de productos después.
 // stockAlConsultar guarda el stock que había en ese momento (NULL si el artículo no usa
-// stock, ya que "sin stock" no aplica) — así el Portal puede mostrar qué se buscó estando
-// agotado, para revisar cuando vuelva a haber.
+// stock) — así el Portal puede mostrar qué se buscó estando agotado.
 async function registrarConsulta(clienteId, userId, texto, rows) {
-  const pool = await getPool();
-
-  if (rows.length === 0) {
-    await pool
-      .request()
-      .input('clienteId', sql.Int, clienteId)
-      .input('userId', sql.NVarChar, userId)
-      .input('texto', sql.NVarChar, texto)
-      .query(`
-        INSERT INTO ConsultasArticulo (clienteId, userId, articuloId, textoBuscado, encontrado, stockAlConsultar)
-        VALUES (@clienteId, @userId, NULL, @texto, 0, NULL)
-      `);
-    return;
-  }
-
-  for (const row of rows) {
-    await pool
-      .request()
-      .input('clienteId', sql.Int, clienteId)
-      .input('userId', sql.NVarChar, userId)
-      .input('texto', sql.NVarChar, texto)
-      .input('articuloId', sql.Int, row.articuloId)
-      .input('stockAlConsultar', sql.Int, row.usaStock ? row.cantidad : null)
-      .query(`
-        INSERT INTO ConsultasArticulo (clienteId, userId, articuloId, textoBuscado, encontrado, stockAlConsultar)
-        VALUES (@clienteId, @userId, @articuloId, @texto, 1, @stockAlConsultar)
-      `);
-  }
+  const resultados = rows.map(r => ({ articuloId: r.articuloId, stock: r.usaStock ? r.cantidad : null }));
+  await ejecutar('dbo.usp_Bot_ConsultaArticuloRegistrar', {
+    clienteId: [sql.Int, clienteId],
+    userId: [sql.NVarChar(100), userId],
+    texto: [sql.NVarChar(200), String(texto).slice(0, 200)],
+    resultados: [sql.NVarChar(sql.MAX), JSON.stringify(resultados)],
+  });
 }
 
 module.exports = { buscarArticulos, registrarConsulta, obtenerFotos };

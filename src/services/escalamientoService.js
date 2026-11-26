@@ -1,17 +1,18 @@
-const { getPool, sql } = require('./db');
+const { ejecutar, sql } = require('./db');
+const portalAviso = require('./portalAvisoService');
 
 // pedidoId es opcional: solo se completa cuando Claude identificó con certeza a qué
 // Pedido se refiere el reclamo (vía buscar_pedidos_cliente), para que el Portal pueda
 // resolver este Escalamiento automáticamente cuando el Pedido se marque "solucionado".
 async function registrarEscalamiento(clienteId, userId, motivo, pedidoId = null) {
-  const pool = await getPool();
-  await pool
-    .request()
-    .input('clienteId', sql.Int, clienteId)
-    .input('userId', sql.NVarChar, userId)
-    .input('motivo', sql.NVarChar, motivo)
-    .input('pedidoId', sql.Int, pedidoId)
-    .query('INSERT INTO Escalamientos (clienteId, userId, motivo, pedidoId) VALUES (@clienteId, @userId, @motivo, @pedidoId)');
+  const result = await ejecutar('dbo.usp_Bot_EscalamientoRegistrar', {
+    clienteId: [sql.Int, clienteId],
+    userId: [sql.NVarChar(100), userId],
+    motivo: [sql.NVarChar(sql.MAX), motivo],
+    pedidoId: [sql.Int, pedidoId],
+  });
+  portalAviso.avisar(clienteId, 'escalamiento', userId);
+  return result.recordset[0]?.id ?? null;
 }
 
 module.exports = { registrarEscalamiento };

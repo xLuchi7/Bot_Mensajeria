@@ -7,6 +7,9 @@ const cliente = require('./clienteService');
 const escalamientos = require('./escalamientoService');
 const pedidos = require('./pedidoService');
 const email = require('./emailService');
+const revision = require('./revisionService');
+const logs = require('./logService');
+const { costoUsd } = require('../config/precios');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 const BASE_PROMPT = fs.readFileSync(path.join(__dirname, '../../prompts/base.txt'), 'utf8');
@@ -44,6 +47,18 @@ const tools = [
         pedidoId: { type: 'integer', description: 'Número del pedido al que se refiere el reclamo, SOLO si lo identificaste con certeza. Omitilo si no estás seguro.' },
       },
       required: ['motivo'],
+    },
+  },
+  {
+    name: 'pasar_a_revision_humana',
+    description: 'Llamala cuando el cliente pida hablar con una persona, un humano, un asesor, el dueño o alguien del equipo, o cuando insulte, putee o esté muy agresivo. Al llamarla el chat pasa a una persona del equipo: no sigas la conversación ni escribas nada más (el sistema le responde al cliente que espere). No la uses para reclamos comunes donde el cliente no pidió una persona ni está agresivo: para eso está escalar_a_humano.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tipo: { type: 'string', enum: ['pide_persona', 'agresion'], description: 'pide_persona: pidió hablar con una persona. agresion: insulta o está muy agresivo.' },
+        motivo: { type: 'string', description: 'Resumen breve de lo que pasó, sin inventar datos' },
+      },
+      required: ['tipo', 'motivo'],
     },
   },
   {
@@ -96,9 +111,21 @@ const MAX_FOTOS_POR_ARTICULO = 5;
 
 // `fotos` junta lo que hay que mandar: se envía recién cuando la respuesta está
 // lista (y si el bot no se apagó en el medio), no en el momento de la tool.
+// Cada tool queda en Logs con lo que pidió Claude, lo que se le devolvió y cuánto tardó.
 async function ejecutarTool(clienteId, userId, block, fotos) {
   console.log(`[claude] Tool call: ${block.name} — cliente=${clienteId} user=${userId} input=${JSON.stringify(block.input)}`);
+  const inicio = Date.now();
+  const resultado = await correrTool(clienteId, userId, block, fotos);
+  const fallo = /^(Error|No se pudo|Tool desconocida)/.test(resultado);
+  logs.registrar(fallo ? 'warn' : 'info', `tool_${block.name}`, {
+    clienteId, userId,
+    duracionMs: Date.now() - inicio,
+    detalle: { input: block.input, resultado: resultado.length > 4000 ? `${resultado.slice(0, 4000)}…` : resultado },
+  });
+  return resultado;
+}
 
+async function correrTool(clienteId, userId, block, fotos) {
   if (block.name === 'enviar_fotos_articulo') {
     try {
       const articulo = await articulos.obtenerFotos(clienteId, block.input.nombre);
@@ -190,33 +217,89 @@ async function ejecutarTool(clienteId, userId, block, fotos) {
  * @param {number} clienteId
  * @param {string} userId
  * @param {Array<{role: string, content: string}>} messages
- * @returns {Promise<{text: string, fotos: Array<{nombre: string, urls: string[]}>, inputTokens: number, outputTokens: number, escalado: boolean, pedidoCreado: boolean, consultoPedidos: boolean}>}
+ * @returns {Promise<{text: string, fotos: Array<{nombre: string, urls: string[]}>, inputTokens: number, outputTokens: number, costoUsd: number|null, escalado: boolean, pedidoCreado: boolean, consultoPedidos: boolean, revisionHumana: {tipo: string, motivo: string} | null}>}
  */
 async function generateResponse(clienteId, userId, messages) {
   const conversationMessages = [...messages];
   const fotos = [];
   const systemPrompt = await buildSystemPrompt(clienteId);
+  // inputTokens = todo lo que entró (sin caché + leído de caché + escrito en caché),
+  // así en Mensajes se ve el tamaño real del prompt.
   let inputTokens = 0;
   let outputTokens = 0;
+  let costoTotal = 0;
   let escalado = false;
   let pedidoCreado = false;
   let consultoPedidos = false;
 
   for (let i = 0; i < 5; i++) {
-    const response = await client.messages.create({
-      model: config.anthropic.model,
-      max_tokens: config.anthropic.maxTokens,
-      system: systemPrompt,
-      messages: conversationMessages,
-      tools,
-    });
+    const inicio = Date.now();
+    let response;
+    try {
+      response = await client.messages.create({
+        model: config.anthropic.model,
+        max_tokens: config.anthropic.maxTokens,
+        output_config: { effort: config.anthropic.effort },
+        // Caché automática: el system prompt y las tools son iguales en cada llamada,
+        // así que las siguientes se cobran mucho más barato.
+        cache_control: { type: 'ephemeral' },
+        system: systemPrompt,
+        messages: conversationMessages,
+        tools,
+      });
+    } catch (err) {
+      logs.error('claude_error', {
+        clienteId, userId,
+        modelo: config.anthropic.model,
+        duracionMs: Date.now() - inicio,
+        detalle: { vuelta: i + 1, status: err.status ?? null, tipo: err.error?.error?.type ?? err.name, mensaje: err.message, requestId: err.requestID ?? err.request_id ?? null },
+      });
+      throw err;
+    }
 
-    inputTokens += response.usage?.input_tokens ?? 0;
-    outputTokens += response.usage?.output_tokens ?? 0;
+    const u = response.usage || {};
+    const costo = costoUsd(response.model || config.anthropic.model, u);
+    inputTokens += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    outputTokens += u.output_tokens || 0;
+    if (costo != null) costoTotal += costo;
+
+    // Una fila por llamada a la API: es la que tiene el costo (sumando costoUsd de
+    // las filas 'claude_llamada' se obtiene el gasto real).
+    logs.registrar(response.stop_reason === 'max_tokens' || response.stop_reason === 'refusal' ? 'warn' : 'info', 'claude_llamada', {
+      clienteId, userId,
+      modelo: response.model || config.anthropic.model,
+      inputTokens: u.input_tokens || 0,
+      outputTokens: u.output_tokens || 0,
+      cacheLecturaTokens: u.cache_read_input_tokens || 0,
+      cacheEscrituraTokens: u.cache_creation_input_tokens || 0,
+      costoUsd: costo ?? undefined,
+      duracionMs: Date.now() - inicio,
+      detalle: {
+        vuelta: i + 1,
+        id: response.id,
+        stopReason: response.stop_reason,
+        effort: config.anthropic.effort,
+        maxTokens: config.anthropic.maxTokens,
+        mensajesEnviados: conversationMessages.length,
+        tools: response.content.filter(b => b.type === 'tool_use').map(b => b.name),
+        texto: response.content.find(b => b.type === 'text')?.text?.slice(0, 2000) ?? null,
+        ...(costo == null ? { aviso: `Sin precio cargado para ${response.model} en src/config/precios.js` } : {}),
+      },
+    });
 
     if (response.stop_reason !== 'tool_use') {
       const text = response.content.find(block => block.type === 'text')?.text ?? '';
-      return { text, fotos, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos };
+      return { text, fotos, inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null };
+    }
+
+    // Revisión humana: se corta acá, sin otra vuelta a Claude. La respuesta al
+    // cliente es siempre la misma y el controller pausa el chat y avisa.
+    const pedidoRevision = response.content.find(b => b.type === 'tool_use' && b.name === 'pasar_a_revision_humana');
+    if (pedidoRevision) {
+      logs.info('tool_pasar_a_revision_humana', { clienteId, userId, detalle: { input: pedidoRevision.input } });
+      const tipo = revision.TIPOS[pedidoRevision.input?.tipo] ? pedidoRevision.input.tipo : 'pide_persona';
+      const motivo = String(pedidoRevision.input?.motivo || '').slice(0, 300) || revision.TIPOS[tipo];
+      return { text: revision.MENSAJE_ESPERA, fotos: [], inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: { tipo, motivo } };
     }
 
     conversationMessages.push({ role: 'assistant', content: response.content });
@@ -237,7 +320,8 @@ async function generateResponse(clienteId, userId, messages) {
     conversationMessages.push({ role: 'user', content: toolResults });
   }
 
-  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', fotos: [], inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos };
+  logs.warn('claude_sin_respuesta', { clienteId, userId, detalle: 'Se llegó al tope de 5 vueltas de tools sin respuesta final' });
+  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', fotos: [], inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null };
 }
 
 module.exports = { generateResponse };

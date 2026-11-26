@@ -10,8 +10,19 @@ module.exports = {
   },
   anthropic: {
     apiKey: process.env.ANTHROPIC_API_KEY,
-    model: process.env.CLAUDE_MODEL || 'claude-sonnet-5',
-    maxTokens: parseInt(process.env.MAX_TOKENS || '1024', 10),
+    // Haiku 5.5: ~20 veces más barato que Sonnet 5 y le sobra para atención por WhatsApp.
+    model: process.env.CLAUDE_MODEL || 'claude-haiku-5-5',
+    // low | medium | high. En Haiku 5.5 el razonamiento viene prendido; 'low' alcanza
+    // para un chat, gasta menos tokens y responde más rápido.
+    effort: process.env.CLAUDE_EFFORT || 'low',
+    // El razonamiento también cuenta para este tope: con menos de ~2000 se puede cortar la respuesta.
+    maxTokens: parseInt(process.env.MAX_TOKENS || '2048', 10),
+  },
+  // Revisión humana: si el número de alertas no le escribió al bot en 24 hs, WhatsApp
+  // solo deja mandarle una plantilla aprobada ({{1}} número del cliente, {{2}} motivo).
+  alertas: {
+    plantilla: process.env.ALERTA_PLANTILLA || null,
+    idioma: process.env.ALERTA_PLANTILLA_IDIOMA || 'es_AR',
   },
   conversation: {
     maxHistory: parseInt(process.env.MAX_HISTORY || '20', 10),
@@ -25,8 +36,11 @@ module.exports = {
   },
   // Token compartido con Portal_Mensajeria (su BOT_API_TOKEN) para /portal/*.
   // Sin esto configurado, el Portal no puede mandar mensajes.
+  // PORTAL_URL (opcional, sin "/" final): para avisarle al Portal en tiempo real
+  // cuando hay mensajes, reclamos o pedidos nuevos (usa el mismo token).
   portal: {
     apiToken: process.env.PORTAL_API_TOKEN,
+    url: (process.env.PORTAL_URL || '').replace(/\/+$/, ''),
   },
   email: {
     gmailUser: process.env.GMAIL_USER,

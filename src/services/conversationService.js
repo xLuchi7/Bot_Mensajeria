@@ -1,5 +1,6 @@
 const config = require('../config');
-const { getPool, sql } = require('./db');
+const { ejecutar, sql } = require('./db');
+const portalAviso = require('./portalAvisoService');
 
 // Historial para Claude: los últimos MAX_HISTORY mensajes de ese número.
 // - Se excluyen los mensajes de error (esError = 1): son avisos genéricos que no
@@ -12,21 +13,11 @@ const { getPool, sql } = require('./db');
 //   primer mensaje del cliente, para que la API siempre reciba user/assistant
 //   alternados y empezando por user.
 async function getHistory(clienteId, userId) {
-  const pool = await getPool();
-  const result = await pool
-    .request()
-    .input('clienteId', sql.Int, clienteId)
-    .input('userId', sql.NVarChar, userId)
-    .input('max', sql.Int, config.conversation.maxHistory)
-    .query(`
-      SELECT role, content FROM (
-        SELECT TOP (@max) id, role, content
-        FROM Mensajes
-        WHERE clienteId = @clienteId AND userId = @userId AND esError = 0
-        ORDER BY id DESC
-      ) recent
-      ORDER BY id ASC
-    `);
+  const result = await ejecutar('dbo.usp_Bot_MensajesHistorial', {
+    clienteId: [sql.Int, clienteId],
+    userId: [sql.NVarChar(100), userId],
+    max: [sql.Int, config.conversation.maxHistory],
+  });
 
   const historial = [];
   for (const { role, content } of result.recordset) {
@@ -38,26 +29,23 @@ async function getHistory(clienteId, userId) {
   return historial;
 }
 
+// Devuelve el id del mensaje guardado.
 async function addMessage(clienteId, userId, role, content, platform, meta = {}) {
-  const pool = await getPool();
   const { inputTokens = null, outputTokens = null, esError = false, modelo = null, enviadoPor = null } = meta;
-
-  await pool
-    .request()
-    .input('clienteId', sql.Int, clienteId)
-    .input('userId', sql.NVarChar, userId)
-    .input('platform', sql.NVarChar, platform)
-    .input('role', sql.NVarChar, role)
-    .input('content', sql.NVarChar(sql.MAX), content)
-    .input('inputTokens', sql.Int, inputTokens)
-    .input('outputTokens', sql.Int, outputTokens)
-    .input('esError', sql.Bit, esError)
-    .input('modelo', sql.NVarChar, modelo)
-    .input('enviadoPor', sql.NVarChar, enviadoPor)
-    .query(`
-      INSERT INTO Mensajes (clienteId, userId, platform, role, content, inputTokens, outputTokens, esError, modelo, enviadoPor)
-      VALUES (@clienteId, @userId, @platform, @role, @content, @inputTokens, @outputTokens, @esError, @modelo, @enviadoPor)
-    `);
+  const result = await ejecutar('dbo.usp_Bot_MensajeInsertar', {
+    clienteId: [sql.Int, clienteId],
+    userId: [sql.NVarChar(100), userId],
+    platform: [sql.NVarChar(20), platform],
+    role: [sql.NVarChar(20), role],
+    content: [sql.NVarChar(sql.MAX), content],
+    inputTokens: [sql.Int, inputTokens],
+    outputTokens: [sql.Int, outputTokens],
+    esError: [sql.Bit, esError],
+    modelo: [sql.NVarChar(50), modelo],
+    enviadoPor: [sql.NVarChar(255), enviadoPor],
+  });
+  portalAviso.avisar(clienteId, 'mensaje', userId);
+  return result.recordset[0]?.id ?? null;
 }
 
 module.exports = { getHistory, addMessage };

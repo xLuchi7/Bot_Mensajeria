@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const config = require('../config');
+const logs = require('./logService');
 
 const LOGO_PATH = path.join(__dirname, '../../assets/logo.png');
 
@@ -103,7 +104,10 @@ async function enviarNotificacionPedido(email, pedidoId, items, total) {
     console.warn('[email] GMAIL_USER no configurado, se omite la notificación del pedido.');
     return;
   }
-  if (!email) return; // el Cliente no cargó su email todavía
+  if (!email) { // el Cliente no cargó su email todavía
+    logs.info('email_pedido_omitido', { detalle: { pedidoId, motivo: 'El Cliente no tiene email cargado' } });
+    return;
+  }
 
   try {
     await transporter.sendMail({
@@ -120,6 +124,7 @@ async function enviarNotificacionPedido(email, pedidoId, items, total) {
       ],
     });
     console.log(`[email] Notificación del pedido #${pedidoId} enviada a ${email}`);
+    logs.info('email_pedido_enviado', { detalle: { pedidoId, email, total, items: items.length } });
   } catch (err) {
     console.error('[email] Error al enviar notificación de pedido:', err.message);
   }

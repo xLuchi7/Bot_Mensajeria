@@ -5,6 +5,8 @@ const meta = require('../services/metaService');
 const cliente = require('../services/clienteService');
 const dedupe = require('../services/dedupeService');
 const escalamientos = require('../services/escalamientoService');
+const revision = require('../services/revisionService');
+const logs = require('../services/logService');
 
 // Red de seguridad: si el modelo no llama a la tool escalar_a_humano pero el
 // mensaje suena a reclamo, lo registramos igual — perder un reclamo real cuesta
@@ -68,7 +70,7 @@ async function processWhatsApp(entry) {
   for (const change of entry.changes || []) {
     if (change.field !== 'messages') continue;
 
-    const { metadata, messages = [], contacts = [] } = change.value || {};
+    const { metadata, messages = [], contacts = [], statuses = [] } = change.value || {};
     const phoneNumberId = metadata?.phone_number_id;
     const clienteId = await cliente.resolveClienteIdByPhone(metadata?.display_phone_number);
 
@@ -77,53 +79,94 @@ async function processWhatsApp(entry) {
       continue;
     }
 
+    // Estados de lo que mandamos (enviado / entregado / leído / falló).
+    for (const st of statuses) {
+      logs.registrar(st.status === 'failed' ? 'error' : 'info', `whatsapp_${st.status}`, {
+        clienteId,
+        userId: st.recipient_id,
+        detalle: { waMessageId: st.id, estado: st.status, timestamp: st.timestamp, errores: st.errors, conversacion: st.conversation, precio: st.pricing },
+      });
+    }
+
     if (messages.length) {
       await cliente.guardarPhoneNumberId(clienteId, phoneNumberId).catch(err =>
         console.error('[whatsapp] No se pudo guardar el phone_number_id:', err.message));
     }
 
     for (const msg of messages) {
-      if (msg.type !== 'text') {
-        console.log(`[whatsapp] Ignored non-text message type: ${msg.type}`);
-        continue;
-      }
-
-      if (await dedupe.yaFueProcesado(msg.id)) {
-        console.log(`[whatsapp] Mensaje duplicado ignorado: ${msg.id}`);
-        continue;
-      }
-
-      const userId = msg.from;
-      const text = msg.text?.body;
-      if (!text) continue;
-
-      console.log(`[whatsapp] Message from ${userId}: "${text.slice(0, 60)}"`);
-
-      // Bot apagado (general o para este chat): guardamos el mensaje igual para
-      // que el Cliente lo vea en el Portal, pero no llamamos a Claude ni respondemos.
-      const estadoBot = await cliente.botPuedeResponder(clienteId, userId);
-
-      // Nombre que la persona tiene en su perfil de WhatsApp (la API no da la foto
-      // ni cómo la tiene agendada el negocio). botPuedeResponder ya creó la fila en Chats.
-      const nombrePerfil = contacts.find(c => c.wa_id === userId)?.profile?.name;
-      if (nombrePerfil) {
-        await cliente.guardarNombrePerfil(clienteId, userId, nombrePerfil).catch(err =>
-          console.error('[whatsapp] No se pudo guardar el nombre de perfil:', err.message));
-      }
-
-      if (!estadoBot.puede) {
-        await conversation.addMessage(clienteId, userId, 'user', text, 'whatsapp');
-        console.log(`[whatsapp] Sin respuesta a ${userId}: ${estadoBot.motivo}`);
-        continue;
-      }
-
-      await meta.sendTypingIndicator(phoneNumberId, msg.id);
-      const respuesta = await buildReply(clienteId, 'whatsapp', userId, text);
-      if (respuesta === null) continue;
-      await enviarFotos(phoneNumberId, userId, respuesta.fotos);
-      await meta.sendWhatsAppMessage(phoneNumberId, userId, respuesta.text);
-      console.log(`[whatsapp] Reply sent to ${userId}`);
+      // Todo lo que se loguee mientras se procesa este mensaje (incluidos los
+      // console.error de cualquier servicio) queda con su clienteId y userId.
+      await logs.conContexto({ clienteId, userId: msg.from }, () =>
+        procesarMensajeWhatsApp(clienteId, phoneNumberId, msg, contacts));
     }
+  }
+}
+
+async function procesarMensajeWhatsApp(clienteId, phoneNumberId, msg, contacts) {
+  const userId = msg.from;
+  const nombrePerfil = contacts.find(c => c.wa_id === userId)?.profile?.name;
+
+  if (msg.type !== 'text') {
+    console.log(`[whatsapp] Ignored non-text message type: ${msg.type}`);
+    logs.info('mensaje_no_texto', { detalle: { waMessageId: msg.id, tipo: msg.type, nombrePerfil, contenido: msg[msg.type] ?? null } });
+    return;
+  }
+
+  if (await dedupe.yaFueProcesado(msg.id)) {
+    console.log(`[whatsapp] Mensaje duplicado ignorado: ${msg.id}`);
+    logs.info('mensaje_duplicado', { detalle: { waMessageId: msg.id } });
+    return;
+  }
+
+  const text = msg.text?.body;
+  if (!text) return;
+
+  console.log(`[whatsapp] Message from ${userId}: "${text.slice(0, 60)}"`);
+  logs.info('mensaje_recibido', { detalle: { waMessageId: msg.id, texto: text, nombrePerfil, timestamp: msg.timestamp, phoneNumberId } });
+
+  // Bot apagado (general o para este chat): guardamos el mensaje igual para
+  // que el Cliente lo vea en el Portal, pero no llamamos a Claude ni respondemos.
+  const estadoBot = await cliente.botPuedeResponder(clienteId, userId);
+
+  // Nombre que la persona tiene en su perfil de WhatsApp (la API no da la foto
+  // ni cómo la tiene agendada el negocio). botPuedeResponder ya creó la fila en Chats.
+  if (nombrePerfil) {
+    await cliente.guardarNombrePerfil(clienteId, userId, nombrePerfil).catch(err =>
+      console.error('[whatsapp] No se pudo guardar el nombre de perfil:', err.message));
+  }
+
+  if (!estadoBot.puede) {
+    await conversation.addMessage(clienteId, userId, 'user', text, 'whatsapp');
+    console.log(`[whatsapp] Sin respuesta a ${userId}: ${estadoBot.motivo}`);
+    logs.info('bot_no_responde', { detalle: { motivo: estadoBot.motivo, waMessageId: msg.id } });
+    return;
+  }
+
+  const inicio = Date.now();
+  await meta.sendTypingIndicator(phoneNumberId, msg.id);
+  const respuesta = await buildReply(clienteId, 'whatsapp', userId, text);
+  if (respuesta === null) return;
+  await enviarFotos(phoneNumberId, userId, respuesta.fotos);
+  await meta.sendWhatsAppMessage(phoneNumberId, userId, respuesta.text);
+  console.log(`[whatsapp] Reply sent to ${userId}`);
+  // Resumen de toda la respuesta: lo que costó en total está acá en el detalle (el
+  // costo por llamada, en las filas 'claude_llamada').
+  logs.info('respuesta_enviada', {
+    duracionMs: Date.now() - inicio,
+    detalle: {
+      texto: respuesta.text,
+      fotos: respuesta.fotos.reduce((n, f) => n + f.urls.length, 0),
+      modelo: respuesta.modelo ?? null,
+      inputTokens: respuesta.inputTokens ?? 0,
+      outputTokens: respuesta.outputTokens ?? 0,
+      costoUsdTotal: respuesta.costoUsd ?? null,
+      revisionHumana: respuesta.revisionHumana,
+    },
+  });
+
+  // El cliente ya recibió "esperame que lo consulto": ahora el aviso al número de alertas.
+  if (respuesta.revisionHumana) {
+    await revision.alertar(phoneNumberId, clienteId, userId, respuesta.revisionHumana, text);
   }
 }
 
@@ -168,15 +211,25 @@ function notaFotos(fotos) {
   return fotos.map(f => `(Se ${f.urls.length === 1 ? 'envió 1 foto' : `enviaron ${f.urls.length} fotos`} de «${f.nombre}»)`).join('\n');
 }
 
-// Devuelve { text, fotos } a enviar, o null si el bot se apagó mientras se generaba.
+// Devuelve { text, fotos, revisionHumana } a enviar, o null si el bot se apagó mientras se generaba.
 async function buildReply(clienteId, platform, userId, text) {
   await conversation.addMessage(clienteId, userId, 'user', text, platform);
+
+  // Pide una persona o está insultando: sin pasar por Claude, se pausa el chat y
+  // se le pide que espere (ver revisionService).
+  const detectado = revision.detectar(text);
+  if (detectado) {
+    await revision.activar(clienteId, userId, detectado, text);
+    await conversation.addMessage(clienteId, userId, 'assistant', revision.MENSAJE_ESPERA, platform);
+    return { text: revision.MENSAJE_ESPERA, fotos: [], revisionHumana: detectado };
+  }
 
   try {
     const history = await conversation.getHistory(clienteId, userId);
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const { text: reply, fotos, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos } = await claude.generateResponse(clienteId, userId, history);
+    const { text: reply, fotos, inputTokens, outputTokens, costoUsd, escalado, pedidoCreado, consultoPedidos, revisionHumana } = await claude.generateResponse(clienteId, userId, history);
     if (await seApagoMientrasTanto(clienteId, userId)) return null;
+    if (revisionHumana) await revision.activar(clienteId, userId, revisionHumana, text);
     if (fotos.length) {
       await conversation.addMessage(clienteId, userId, 'assistant', notaFotos(fotos), platform);
     }
@@ -187,16 +240,17 @@ async function buildReply(clienteId, platform, userId, text) {
     });
     console.log(`[claude] Response for ${userId}: "${reply.slice(0, 80)}" (tokens in=${inputTokens} out=${outputTokens})`);
 
-    if (!escalado && !consultoPedidos && PATRON_RECLAMO.test(text)) {
+    if (!escalado && !consultoPedidos && !revisionHumana && PATRON_RECLAMO.test(text)) {
       console.warn(`[escalamiento] Fallback disparado — Claude no llamó la tool pero el mensaje parece un reclamo: "${text.slice(0, 80)}"`);
       await escalamientos.registrarEscalamiento(clienteId, userId, `[Auto-detectado] "${text.slice(0, 200)}"`);
+      logs.warn('escalamiento_auto', { detalle: { mensaje: text } });
     }
 
     if (!pedidoCreado && PATRON_PEDIDO_CONFIRMADO.test(reply)) {
       console.warn(`[pedido] Posible pedido "fantasma" — la respuesta suena a confirmación pero no se llamó crear_pedido: "${reply.slice(0, 80)}"`);
     }
 
-    return { text: reply, fotos };
+    return { text: reply, fotos, revisionHumana, modelo: config.anthropic.model, inputTokens, outputTokens, costoUsd };
   } catch (err) {
     // Antes acá se borraba todo el historial del número (DELETE en Mensajes) para
     // "resetear" la conversación, pero Mensajes es también el historial que ve el
@@ -209,7 +263,7 @@ async function buildReply(clienteId, platform, userId, text) {
       esError: true,
       modelo: config.anthropic.model,
     });
-    return { text: errorReply, fotos: [] };
+    return { text: errorReply, fotos: [], revisionHumana: null };
   }
 }
 
