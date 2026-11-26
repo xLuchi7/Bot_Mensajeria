@@ -80,4 +80,51 @@ router.post('/enviar', async (req, res) => {
   }
 });
 
+// POST /portal/plantilla { clienteId, userId, plantilla, idioma, parametros, texto, enviadoPor }
+// Avisos automáticos del Portal (pedido despachado, pago recibido…) fuera de la
+// ventana de 24 h: van como plantilla aprobada por Meta. `texto` es cómo quedó
+// el mensaje armado, para guardarlo en Mensajes y que se vea en el chat.
+router.post('/plantilla', async (req, res) => {
+  const clienteId = parseInt(req.body?.clienteId, 10);
+  const userId = typeof req.body?.userId === 'string' ? req.body.userId : '';
+  const plantilla = typeof req.body?.plantilla === 'string' ? req.body.plantilla.trim() : '';
+  const idioma = typeof req.body?.idioma === 'string' && req.body.idioma.trim() ? req.body.idioma.trim() : 'es_AR';
+  const parametros = Array.isArray(req.body?.parametros) ? req.body.parametros.map(p => String(p ?? '').slice(0, 1000)) : [];
+  const texto = typeof req.body?.texto === 'string' ? req.body.texto.trim().slice(0, MAX_LARGO) : '';
+  const enviadoPor = typeof req.body?.enviadoPor === 'string' ? req.body.enviadoPor.slice(0, 255) : null;
+
+  if (!clienteId || !userId || !/^[a-z0-9_]{1,512}$/.test(plantilla) || parametros.length > 10) {
+    return res.status(400).json({ ok: false, error: 'datos_invalidos' });
+  }
+
+  try {
+    const datos = await cliente.getDatosEnvio(clienteId);
+    if (!datos || !datos.activo) return res.status(404).json({ ok: false, error: 'cliente_inexistente' });
+    if (!datos.whatsappPhoneNumberId) return res.status(409).json({ ok: false, error: 'sin_numero' });
+
+    // Igual que /enviar: solo a personas que ya le escribieron a este Cliente.
+    const pool = await getPool();
+    const chat = await pool
+      .request()
+      .input('clienteId', sql.Int, clienteId)
+      .input('userId', sql.NVarChar, userId)
+      .query("SELECT TOP 1 1 AS existe FROM Mensajes WHERE clienteId = @clienteId AND userId = @userId AND role = 'user'");
+    if (!chat.recordset.length) return res.status(404).json({ ok: false, error: 'chat_inexistente' });
+
+    try {
+      await meta.sendWhatsAppTemplate(datos.whatsappPhoneNumberId, userId, plantilla, idioma, parametros);
+    } catch (err) {
+      const detalle = err.response?.data?.error?.message || err.message;
+      return res.status(502).json({ ok: false, error: 'plantilla_error', detalle });
+    }
+
+    await conversation.addMessage(clienteId, userId, 'assistant', texto || `[Plantilla ${plantilla}]`, 'whatsapp', { enviadoPor });
+    console.log(`[portal] Plantilla ${plantilla} enviada a ${userId} (cliente ${clienteId})`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[portal] Error enviando plantilla:', err.message);
+    res.status(500).json({ ok: false, error: 'error_interno' });
+  }
+});
+
 module.exports = router;

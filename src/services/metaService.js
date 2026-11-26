@@ -83,4 +83,29 @@ async function sendFacebookMessage(pageId, recipientId, text) {
   }
 }
 
-module.exports = { sendTypingIndicator, sendWhatsAppMessage, sendInstagramMessage, sendFacebookMessage };
+// Plantilla aprobada por Meta: es lo único que se puede mandar pasadas las 24 h
+// desde el último mensaje del cliente. `parametros` llena {{1}}, {{2}}… del cuerpo.
+async function sendWhatsAppTemplate(phoneNumberId, to, nombre, idioma, parametros = []) {
+  const template = { name: nombre, language: { code: idioma } };
+  if (parametros.length) {
+    template.components = [{ type: 'body', parameters: parametros.map(p => ({ type: 'text', text: String(p) })) }];
+  }
+  try {
+    await axios.post(
+      `${BASE}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: normalizeArgentinaNumber(to),
+        type: 'template',
+        template,
+      },
+      { headers: { Authorization: `Bearer ${config.meta.whatsappToken}` } }
+    );
+  } catch (err) {
+    logApiError('whatsapp', err);
+    throw err;
+  }
+}
+
+module.exports = { sendTypingIndicator, sendWhatsAppMessage, sendWhatsAppTemplate, sendInstagramMessage, sendFacebookMessage };
