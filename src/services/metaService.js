@@ -57,6 +57,26 @@ async function sendWhatsAppMessage(phoneNumberId, to, text) {
   }
 }
 
+// Imagen por URL pública: Meta la descarga sola (JPG o PNG, hasta 5 MB).
+async function sendWhatsAppImage(phoneNumberId, to, link, caption) {
+  try {
+    await axios.post(
+      `${BASE}/${phoneNumberId}/messages`,
+      {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: normalizeArgentinaNumber(to),
+        type: 'image',
+        image: caption ? { link, caption } : { link },
+      },
+      { headers: { Authorization: `Bearer ${config.meta.whatsappToken}` } }
+    );
+  } catch (err) {
+    logApiError('whatsapp', err);
+    throw err;
+  }
+}
+
 async function sendInstagramMessage(pageId, recipientId, text) {
   try {
     await axios.post(
@@ -108,4 +128,4 @@ async function sendWhatsAppTemplate(phoneNumberId, to, nombre, idioma, parametro
   }
 }
 
-module.exports = { sendTypingIndicator, sendWhatsAppMessage, sendWhatsAppTemplate, sendInstagramMessage, sendFacebookMessage };
+module.exports = { sendTypingIndicator, sendWhatsAppMessage, sendWhatsAppImage, sendWhatsAppTemplate, sendInstagramMessage, sendFacebookMessage };

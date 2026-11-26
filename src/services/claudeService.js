@@ -24,6 +24,17 @@ const tools = [
     },
   },
   {
+    name: 'enviar_fotos_articulo',
+    description: 'Le manda al cliente por WhatsApp las fotos de un artículo (solo sirve si buscar_articulos dijo que tiene fotos > 0). Las fotos le llegan justo ANTES de tu mensaje de texto, así que podés referirte a ellas ("ahí te pasé las fotos"). Usala cuando el cliente pregunta por un producto puntual o pide verlo; si la búsqueda trajo varios, mandá solo las del que le interesa (como mucho 3 artículos por respuesta) y ofrecé las demás. No reenvíes fotos que ya le mandaste en esta conversación salvo que las pida de nuevo.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nombre: { type: 'string', description: 'Nombre exacto del artículo, tal como lo devolvió buscar_articulos' },
+      },
+      required: ['nombre'],
+    },
+  },
+  {
     name: 'escalar_a_humano',
     description: 'Llamala cuando el cliente necesite ayuda de una persona real del equipo: reclamos, devoluciones, problemas con un pedido, o cualquier cosa que no puedas resolver vos. Deja registro para que el equipo haga seguimiento; después avisale al cliente que alguien se va a poner en contacto, sin decir que sos un bot. Si el reclamo es sobre un pedido y lo identificaste con certeza (por ejemplo con buscar_pedidos_cliente), pasá también su pedidoId — eso lo marca como reclamado para que el equipo lo vea aparte. Si no estás seguro de cuál pedido es, dejá pedidoId sin completar (nunca lo inventes).',
     input_schema: {
@@ -79,8 +90,32 @@ Información y preferencias de este negocio en particular. Si acá piden algo di
 ${contexto}`;
 }
 
-async function ejecutarTool(clienteId, userId, block) {
+// Tope de fotos por respuesta, para no inundar el chat.
+const MAX_FOTOS_POR_RESPUESTA = 8;
+const MAX_FOTOS_POR_ARTICULO = 5;
+
+// `fotos` junta lo que hay que mandar: se envía recién cuando la respuesta está
+// lista (y si el bot no se apagó en el medio), no en el momento de la tool.
+async function ejecutarTool(clienteId, userId, block, fotos) {
   console.log(`[claude] Tool call: ${block.name} — cliente=${clienteId} user=${userId} input=${JSON.stringify(block.input)}`);
+
+  if (block.name === 'enviar_fotos_articulo') {
+    try {
+      const articulo = await articulos.obtenerFotos(clienteId, block.input.nombre);
+      if (!articulo) return 'No encontré un artículo activo con ese nombre exacto. Usá el nombre tal como lo devolvió buscar_articulos.';
+      if (!articulo.imagenes.length) return 'Ese artículo no tiene fotos cargadas. No le prometas fotos al cliente.';
+      if (fotos.some(f => f.nombre === articulo.nombre)) return 'Las fotos de ese artículo ya quedaron para enviar en esta respuesta.';
+
+      const enviadas = fotos.reduce((n, f) => n + f.urls.length, 0);
+      const urls = articulo.imagenes.slice(0, Math.min(MAX_FOTOS_POR_ARTICULO, Math.max(0, MAX_FOTOS_POR_RESPUESTA - enviadas)));
+      if (!urls.length) return 'Ya se juntaron muchas fotos en esta respuesta; ofrecele mandar las de este artículo en el próximo mensaje.';
+
+      fotos.push({ nombre: articulo.nombre, urls });
+      return `Listo: ${urls.length === 1 ? 'la foto le llega' : `las ${urls.length} fotos le llegan`} justo antes de tu mensaje.`;
+    } catch (err) {
+      return `Error al buscar las fotos: ${err.message}`;
+    }
+  }
 
   if (block.name === 'buscar_articulos') {
     try {
@@ -91,9 +126,16 @@ async function ejecutarTool(clienteId, userId, block) {
 
       // No hace falta que Claude vea el id interno ni los campos crudos de stock —
       // le resumimos la disponibilidad en un solo campo legible.
-      const paraClaude = rows.map(({ articuloId, usaStock, cantidad, ...resto }) => ({
+      // Con Shopify la descripción llega completa y se repite en cada talle/color
+      // del mismo producto: se recorta para no gastar tokens de más.
+      const paraClaude = rows.map(({ articuloId, usaStock, cantidad, imagenes, descripcion, precioComparacion, marca, opciones, ...resto }) => ({
         ...resto,
+        ...(descripcion ? { descripcion: descripcion.length > 400 ? `${descripcion.slice(0, 400)}…` : descripcion } : {}),
+        ...(precioComparacion && precioComparacion > resto.precio ? { precioAntes: precioComparacion } : {}),
+        ...(marca ? { marca } : {}),
+        ...(opciones ? { opciones } : {}),
         disponibilidad: usaStock ? `${cantidad} en stock` : 'siempre disponible (sin control de stock)',
+        fotos: imagenes.length,
       }));
       return JSON.stringify(paraClaude);
     } catch (err) {
@@ -148,10 +190,11 @@ async function ejecutarTool(clienteId, userId, block) {
  * @param {number} clienteId
  * @param {string} userId
  * @param {Array<{role: string, content: string}>} messages
- * @returns {Promise<{text: string, inputTokens: number, outputTokens: number, escalado: boolean, pedidoCreado: boolean, consultoPedidos: boolean}>}
+ * @returns {Promise<{text: string, fotos: Array<{nombre: string, urls: string[]}>, inputTokens: number, outputTokens: number, escalado: boolean, pedidoCreado: boolean, consultoPedidos: boolean}>}
  */
 async function generateResponse(clienteId, userId, messages) {
   const conversationMessages = [...messages];
+  const fotos = [];
   const systemPrompt = await buildSystemPrompt(clienteId);
   let inputTokens = 0;
   let outputTokens = 0;
@@ -173,7 +216,7 @@ async function generateResponse(clienteId, userId, messages) {
 
     if (response.stop_reason !== 'tool_use') {
       const text = response.content.find(block => block.type === 'text')?.text ?? '';
-      return { text, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos };
+      return { text, fotos, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos };
     }
 
     conversationMessages.push({ role: 'assistant', content: response.content });
@@ -187,14 +230,14 @@ async function generateResponse(clienteId, userId, messages) {
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: await ejecutarTool(clienteId, userId, block),
+        content: await ejecutarTool(clienteId, userId, block, fotos),
       });
     }
 
     conversationMessages.push({ role: 'user', content: toolResults });
   }
 
-  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos };
+  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', fotos: [], inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos };
 }
 
 module.exports = { generateResponse };

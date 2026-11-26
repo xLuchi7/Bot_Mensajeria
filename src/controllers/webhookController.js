@@ -118,9 +118,10 @@ async function processWhatsApp(entry) {
       }
 
       await meta.sendTypingIndicator(phoneNumberId, msg.id);
-      const reply = await buildReply(clienteId, 'whatsapp', userId, text);
-      if (reply === null) continue;
-      await meta.sendWhatsAppMessage(phoneNumberId, userId, reply);
+      const respuesta = await buildReply(clienteId, 'whatsapp', userId, text);
+      if (respuesta === null) continue;
+      await enviarFotos(phoneNumberId, userId, respuesta.fotos);
+      await meta.sendWhatsAppMessage(phoneNumberId, userId, respuesta.text);
       console.log(`[whatsapp] Reply sent to ${userId}`);
     }
   }
@@ -147,15 +148,38 @@ async function seApagoMientrasTanto(clienteId, userId) {
   return true;
 }
 
-// Devuelve el texto a enviar, o null si el bot se apagó mientras se generaba.
+// De a una y en orden (si se mandan en paralelo WhatsApp las puede mezclar). Si
+// una falla (ej. URL caída) se sigue con las demás y con el texto igual.
+async function enviarFotos(phoneNumberId, userId, fotos = []) {
+  for (const { nombre, urls } of fotos) {
+    for (const [i, url] of urls.entries()) {
+      try {
+        await meta.sendWhatsAppImage(phoneNumberId, userId, url, i === 0 ? nombre : undefined);
+      } catch (err) {
+        console.error(`[whatsapp] No se pudo mandar una foto de "${nombre}" a ${userId}:`, err.message);
+      }
+    }
+  }
+}
+
+// Nota que queda en el historial (y se ve en el Portal) para que Claude sepa
+// qué fotos ya mandó y no las repita.
+function notaFotos(fotos) {
+  return fotos.map(f => `(Se ${f.urls.length === 1 ? 'envió 1 foto' : `enviaron ${f.urls.length} fotos`} de «${f.nombre}»)`).join('\n');
+}
+
+// Devuelve { text, fotos } a enviar, o null si el bot se apagó mientras se generaba.
 async function buildReply(clienteId, platform, userId, text) {
   await conversation.addMessage(clienteId, userId, 'user', text, platform);
 
   try {
     const history = await conversation.getHistory(clienteId, userId);
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const { text: reply, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos } = await claude.generateResponse(clienteId, userId, history);
+    const { text: reply, fotos, inputTokens, outputTokens, escalado, pedidoCreado, consultoPedidos } = await claude.generateResponse(clienteId, userId, history);
     if (await seApagoMientrasTanto(clienteId, userId)) return null;
+    if (fotos.length) {
+      await conversation.addMessage(clienteId, userId, 'assistant', notaFotos(fotos), platform);
+    }
     await conversation.addMessage(clienteId, userId, 'assistant', reply, platform, {
       inputTokens,
       outputTokens,
@@ -172,7 +196,7 @@ async function buildReply(clienteId, platform, userId, text) {
       console.warn(`[pedido] Posible pedido "fantasma" — la respuesta suena a confirmación pero no se llamó crear_pedido: "${reply.slice(0, 80)}"`);
     }
 
-    return reply;
+    return { text: reply, fotos };
   } catch (err) {
     // Antes acá se borraba todo el historial del número (DELETE en Mensajes) para
     // "resetear" la conversación, pero Mensajes es también el historial que ve el
@@ -185,7 +209,7 @@ async function buildReply(clienteId, platform, userId, text) {
       esError: true,
       modelo: config.anthropic.model,
     });
-    return errorReply;
+    return { text: errorReply, fotos: [] };
   }
 }
 

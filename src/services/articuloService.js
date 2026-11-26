@@ -12,24 +12,64 @@ async function buscarArticulos(clienteId, texto) {
   const palabras = texto.trim().split(/\s+/).filter(Boolean).map(singularizar);
 
   const request = pool.request().input('clienteId', sql.Int, clienteId);
-  // Cada palabra tiene que aparecer en algún lado (nombre/descripcion/codigo),
-  // pero las palabras entre sí no tienen que estar en el mismo campo ni en orden.
+  // Cada palabra tiene que aparecer en algún lado (nombre, descripción, código,
+  // marca, tipo, categoría, etiquetas o colecciones), pero las palabras entre sí
+  // no tienen que estar en el mismo campo ni en orden.
   const condiciones = palabras
     .map((palabra, i) => {
       request.input(`p${i}`, sql.NVarChar, `%${palabra}%`);
-      return `(a.nombre LIKE @p${i} OR a.descripcion LIKE @p${i} OR a.codigo LIKE @p${i})`;
+      return `(a.nombre LIKE @p${i} OR a.descripcion LIKE @p${i} OR a.codigo LIKE @p${i} OR a.marca LIKE @p${i}
+        OR a.tipoProducto LIKE @p${i} OR a.categoria LIKE @p${i} OR a.etiquetas LIKE @p${i} OR a.colecciones LIKE @p${i})`;
     })
     .join(' AND ');
 
   const result = await request.query(`
-    SELECT a.id AS articuloId, a.nombre, a.descripcion, a.precio, a.usaStock, ISNULL(s.cantidad, 0) AS cantidad
+    SELECT a.id AS articuloId, a.nombre, a.descripcion, a.precio, a.precioComparacion, a.marca, a.opciones,
+           a.usaStock, ISNULL(s.cantidad, 0) AS cantidad, a.imagenes
     FROM Articulos a
     LEFT JOIN Stock s ON s.articuloId = a.id
     WHERE a.clienteId = @clienteId AND a.activo = 1
       AND (${condiciones || '1=1'})
   `);
 
-  return result.recordset;
+  return result.recordset.map(({ imagenes, opciones, ...row }) => ({
+    ...row,
+    opciones: parsearOpciones(opciones),
+    imagenes: parsearImagenes(imagenes),
+  }));
+}
+
+// Articulos.opciones: [{ nombre: "Talle", valor: "38" }] → "Talle: 38"
+function parsearOpciones(valor) {
+  try {
+    const opciones = JSON.parse(valor || '[]');
+    return Array.isArray(opciones) ? opciones.map(o => `${o.nombre}: ${o.valor}`).join(', ') : '';
+  } catch {
+    return '';
+  }
+}
+
+// Articulos.imagenes es un JSON array de URLs públicas (hoy las carga el sync de
+// Shopify del Portal, ya en JPG porque WhatsApp no acepta WebP).
+function parsearImagenes(valor) {
+  try {
+    const urls = JSON.parse(valor || '[]');
+    return Array.isArray(urls) ? urls.filter(u => typeof u === 'string' && u.startsWith('https://')) : [];
+  } catch {
+    return [];
+  }
+}
+
+// Mismo criterio que crear_pedido: nombre exacto y activo.
+async function obtenerFotos(clienteId, nombre) {
+  const pool = await getPool();
+  const result = await pool
+    .request()
+    .input('clienteId', sql.Int, clienteId)
+    .input('nombre', sql.NVarChar, nombre)
+    .query('SELECT TOP 1 nombre, imagenes FROM Articulos WHERE clienteId = @clienteId AND nombre = @nombre AND activo = 1');
+  const row = result.recordset[0];
+  return row ? { nombre: row.nombre, imagenes: parsearImagenes(row.imagenes) } : null;
 }
 
 // Registra qué se buscó y si hubo resultados, para poder analizar demanda de productos después.
@@ -67,4 +107,4 @@ async function registrarConsulta(clienteId, userId, texto, rows) {
   }
 }
 
-module.exports = { buscarArticulos, registrarConsulta };
+module.exports = { buscarArticulos, registrarConsulta, obtenerFotos };
