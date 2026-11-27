@@ -25,7 +25,8 @@ module.exports = {
     idioma: process.env.ALERTA_PLANTILLA_IDIOMA || 'es_AR',
   },
   conversation: {
-    maxHistory: parseInt(process.env.MAX_HISTORY || '20', 10),
+    // Si MAX_HISTORY viene mal escrito, 20 (antes quedaba NaN y el historial salía vacío).
+    maxHistory: parseInt(process.env.MAX_HISTORY, 10) > 0 ? parseInt(process.env.MAX_HISTORY, 10) : 20,
   },
   db: {
     server: process.env.DB_SERVER,

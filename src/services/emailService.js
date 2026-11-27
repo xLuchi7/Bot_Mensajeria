@@ -21,6 +21,16 @@ const transporter = config.email.gmailUser
     })
   : null;
 
+// Los nombres de artículo vienen del catálogo (o de Shopify): se escapan para que
+// no se interpreten como HTML dentro del mail.
+function escaparHtml(texto) {
+  return String(texto ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Un solo destinatario: Clientes.email se carga a mano y "a@x.com, b@y.com" haría
+// que el aviso le llegue a cualquiera que se haya agregado ahí.
+const ES_UN_EMAIL = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+
 function formatearMoneda(monto) {
   return Number(monto).toLocaleString('es-AR');
 }
@@ -33,7 +43,7 @@ function armarHtml(pedidoId, items, total) {
       i => `
         <tr>
           <td style="padding: 10px 0; border-bottom: 1px solid #eef0f5; color: #14172b; font-size: 14px;">
-            ${i.cantidad}x ${i.nombre}
+            ${i.cantidad}x ${escaparHtml(i.nombre)}
           </td>
           <td style="padding: 10px 0; border-bottom: 1px solid #eef0f5; color: #14172b; font-size: 14px; text-align: right; white-space: nowrap;">
             $${formatearMoneda(i.precio * i.cantidad)}
@@ -108,6 +118,11 @@ async function enviarNotificacionPedido(email, pedidoId, items, total) {
     logs.info('email_pedido_omitido', { detalle: { pedidoId, motivo: 'El Cliente no tiene email cargado' } });
     return;
   }
+  if (!ES_UN_EMAIL.test(String(email).trim())) {
+    logs.warn('email_pedido_omitido', { detalle: { pedidoId, motivo: 'El email del Cliente no es una sola dirección válida', email } });
+    return;
+  }
+  email = String(email).trim();
 
   try {
     await transporter.sendMail({

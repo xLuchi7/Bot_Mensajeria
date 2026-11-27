@@ -3,6 +3,27 @@ const config = require('../config');
 const logs = require('./logService');
 
 const BASE = `https://graph.facebook.com/${config.meta.apiVersion}`;
+// Sin timeout, una llamada colgada a Meta dejaba trabada la respuesta de ese chat.
+const http = axios.create({ timeout: 15 * 1000 });
+// Tope de WhatsApp para un mensaje de texto.
+const MAX_TEXTO = 4096;
+
+// Parte un texto largo en pedazos de hasta MAX_TEXTO, cortando en un salto de
+// línea o un espacio cuando se puede (no en el medio de una palabra).
+function partirTexto(texto) {
+  const partes = [];
+  let resto = String(texto);
+  while (resto.length > MAX_TEXTO) {
+    const ventana = resto.slice(0, MAX_TEXTO);
+    let corte = ventana.lastIndexOf('\n');
+    if (corte < MAX_TEXTO / 2) corte = ventana.lastIndexOf(' ');
+    if (corte < MAX_TEXTO / 2) corte = MAX_TEXTO;
+    partes.push(resto.slice(0, corte).trimEnd());
+    resto = resto.slice(corte).trimStart();
+  }
+  if (resto) partes.push(resto);
+  return partes;
+}
 
 function logApiError(platform, err) {
   const status = err.response?.status;
@@ -15,7 +36,7 @@ function logApiError(platform, err) {
 async function postWhatsApp(phoneNumberId, to, tipo, cuerpo, detalleLog) {
   const inicio = Date.now();
   try {
-    const { data } = await axios.post(
+    const { data } = await http.post(
       `${BASE}/${phoneNumberId}/messages`,
       { messaging_product: 'whatsapp', recipient_type: 'individual', to: normalizeArgentinaNumber(to), type: tipo, ...cuerpo },
       { headers: { Authorization: `Bearer ${config.meta.whatsappToken}` } }
@@ -47,7 +68,7 @@ function normalizeArgentinaNumber(number) {
 // usuario mientras armamos la respuesta (dura hasta 25s o hasta que mandemos el mensaje real).
 async function sendTypingIndicator(phoneNumberId, messageId) {
   try {
-    await axios.post(
+    await http.post(
       `${BASE}/${phoneNumberId}/messages`,
       {
         messaging_product: 'whatsapp',
@@ -62,8 +83,11 @@ async function sendTypingIndicator(phoneNumberId, messageId) {
   }
 }
 
+// Más de 4096 caracteres: se manda en varios mensajes, en orden.
 async function sendWhatsAppMessage(phoneNumberId, to, text) {
-  await postWhatsApp(phoneNumberId, to, 'text', { text: { body: text } }, { texto: text });
+  for (const parte of partirTexto(text)) {
+    await postWhatsApp(phoneNumberId, to, 'text', { text: { body: parte } }, { texto: parte });
+  }
 }
 
 // Imagen por URL pública: Meta la descarga sola (JPG o PNG, hasta 5 MB).
@@ -73,7 +97,7 @@ async function sendWhatsAppImage(phoneNumberId, to, link, caption) {
 
 async function sendInstagramMessage(pageId, recipientId, text) {
   try {
-    await axios.post(
+    await http.post(
       `${BASE}/${pageId}/messages`,
       { recipient: { id: recipientId }, message: { text } },
       { headers: { Authorization: `Bearer ${config.meta.instagramToken}` } }
@@ -86,7 +110,7 @@ async function sendInstagramMessage(pageId, recipientId, text) {
 
 async function sendFacebookMessage(pageId, recipientId, text) {
   try {
-    await axios.post(
+    await http.post(
       `${BASE}/${pageId}/messages`,
       { recipient: { id: recipientId }, message: { text } },
       { headers: { Authorization: `Bearer ${config.meta.facebookToken}` } }

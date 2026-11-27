@@ -10,18 +10,41 @@ function singularizar(palabra) {
 // Cada palabra tiene que aparecer en algún lado (nombre, descripción, código,
 // marca, tipo, categoría, etiquetas o colecciones), pero las palabras entre sí
 // no tienen que estar en el mismo campo ni en orden (usp_Bot_ArticulosBuscar).
+// Tope de resultados por búsqueda: sin esto, "a" devolvía todo el catálogo (tokens
+// de más y una fila de ConsultasArticulo por artículo).
+const MAX_RESULTADOS = 15;
+
+// % _ [ dentro de un LIKE son comodines: se escapan para buscarlos como texto.
+const escaparLike = p => p.replace(/[[%_]/g, c => `[${c}]`);
+
+// Devuelve los artículos (hasta MAX_RESULTADOS, los más relevantes primero) y
+// `hayMas` si quedaron otros afuera.
 async function buscarArticulos(clienteId, texto) {
-  const palabras = texto.trim().split(/\s+/).filter(Boolean).map(singularizar);
-  const result = await ejecutar('dbo.usp_Bot_ArticulosBuscar', {
+  const palabras = String(texto || '').trim().split(/\s+/).filter(Boolean).slice(0, 8).map(singularizar).map(escaparLike);
+  if (!palabras.length) return Object.assign([], { hayMas: false });
+
+  const params = {
     clienteId: [sql.Int, clienteId],
     palabras: [sql.NVarChar(sql.MAX), JSON.stringify(palabras)],
-  });
+    max: [sql.Int, MAX_RESULTADOS],
+  };
+  let result;
+  try {
+    result = await ejecutar('dbo.usp_Bot_ArticulosBuscar', params);
+  } catch (err) {
+    // Procedure viejo (todavía no se corrió el SQL nuevo): sin @max.
+    if (!/too many arguments/i.test(err.message)) throw err;
+    delete params.max;
+    result = await ejecutar('dbo.usp_Bot_ArticulosBuscar', params);
+  }
 
-  return result.recordset.map(({ imagenes, opciones, ...row }) => ({
+  const filas = result.recordset;
+  const articulos = filas.slice(0, MAX_RESULTADOS).map(({ imagenes, opciones, ...row }) => ({
     ...row,
     opciones: parsearOpciones(opciones),
     imagenes: parsearImagenes(imagenes),
   }));
+  return Object.assign(articulos, { hayMas: filas.length > MAX_RESULTADOS });
 }
 
 // Articulos.opciones: [{ nombre: "Talle", valor: "38" }] → "Talle: 38"

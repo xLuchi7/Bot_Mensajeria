@@ -136,7 +136,9 @@ async function alertar(phoneNumberId, clienteId, userId, { tipo, motivo }, texto
     const texto = [
       `⚠️ Revisión humana — ${datos.razonSocial}`,
       `${quien} ${TIPOS[tipo] || 'necesita atención'}.`,
-      `Último mensaje: "${String(textoCliente).slice(0, 300)}"`,
+      // Sin links: el aviso sale desde el número del propio negocio y un link
+      // escrito por un desconocido no tiene que llegarle al dueño como si fuera nuestro.
+      `Último mensaje: "${String(textoCliente).replace(/(https?:\/\/|www\.)\S+/gi, '[link]').slice(0, 300)}"`,
       'El bot quedó pausado en ese chat. Respondele desde el portal y reactivalo cuando termines.',
     ].join('\n');
 

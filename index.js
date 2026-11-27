@@ -8,17 +8,42 @@ const logs = require('./src/services/logService');
 
 // Tabla Logs: eventos del bot + todo console.warn/error. Se purga sola a los 7 días.
 logs.iniciar();
+require('./src/services/dedupeService').iniciarPurga();
 logs.info('bot_iniciado', { detalle: { modelo: config.anthropic.model, effort: config.anthropic.effort } });
 
+// Última red: una promesa rechazada sin catch queda en Logs en vez de pasar desapercibida.
+process.on('unhandledRejection', (err) => {
+  console.error('[proceso] Promesa rechazada sin manejar:', err?.stack || err);
+});
+
 const app = express();
+app.disable('x-powered-by');
+
+// Tope del body de /webhook: se lee ANTES de validar la firma, así que sin límite
+// cualquiera podía mandar un body enorme y llenar la memoria. Meta manda pocos KB.
+const MAX_WEBHOOK_BYTES = 1024 * 1024;
 
 // ── PRIMERO: /webhook con captura de raw body directo del stream ──────────────
 // Lee los bytes del socket HTTP antes de que cualquier middleware los transforme.
 // express.json() global NO debe registrarse antes de esto.
-app.use('/webhook', (req, _res, next) => {
+app.use('/webhook', (req, res, next) => {
+  if (Number(req.get('content-length')) > MAX_WEBHOOK_BYTES) return res.status(413).send('Demasiado grande');
   const chunks = [];
-  req.on('data', chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+  let bytes = 0;
+  let cortado = false;
+  req.on('data', (chunk) => {
+    if (cortado) return;
+    bytes += chunk.length;
+    if (bytes > MAX_WEBHOOK_BYTES) {
+      cortado = true;
+      res.status(413).send('Demasiado grande');
+      req.destroy();
+      return;
+    }
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  });
   req.on('end', () => {
+    if (cortado) return;
     req.rawBody = Buffer.concat(chunks);
     if (req.rawBody.length > 0) {
       try {
@@ -34,7 +59,7 @@ app.use('/webhook', (req, _res, next) => {
 app.use('/webhook', webhookRoutes);
 
 // ── DESPUÉS: express.json() para el resto de rutas ───────────────────────────
-app.use(express.json());
+app.use(express.json({ limit: '256kb' }));
 
 // Endpoints para Portal_Mensajeria (mandar mensajes escritos a mano), con token compartido.
 app.use('/portal', require('./src/routes/portal'));
@@ -54,12 +79,13 @@ app.get('/terminos', (_req, res) => {
 app.listen(config.port, () => {
   console.log(`Bot Mensajeria running on port ${config.port}`);
 
-  const secret = config.meta.appSecret?.trim() ?? '';
-  console.log(`[config] META_APP_SECRET: ${secret.length} chars | starts="${secret.slice(0, 4)}" ends="${secret.slice(-4)}"`);
-  console.log(`[config] META_VERIFY_TOKEN: ${config.meta.verifyToken ? 'set' : 'NOT SET'}`);
-  console.log(`[config] ANTHROPIC_API_KEY: ${config.anthropic.apiKey ? 'set' : 'NOT SET'}`);
-  const igToken = config.meta.instagramToken ?? '';
-  console.log(`[config] INSTAGRAM_ACCESS_TOKEN: ${igToken.length} chars | starts="${igToken.slice(0, 6)}" ends="${igToken.slice(-6)}" hasSpaces=${/\s/.test(igToken)}`);
+  // Solo si están y su largo: ni un pedazo del valor (los logs quedan en la base).
+  const estado = v => (v ? `set (${String(v).trim().length} chars)` : 'NOT SET');
+  console.log(`[config] META_APP_SECRET: ${estado(config.meta.appSecret)}`);
+  console.log(`[config] META_VERIFY_TOKEN: ${estado(config.meta.verifyToken)}`);
+  console.log(`[config] ANTHROPIC_API_KEY: ${estado(config.anthropic.apiKey)}`);
+  console.log(`[config] INSTAGRAM_ACCESS_TOKEN: ${estado(config.meta.instagramToken)}`);
+  console.log(`[config] PORTAL_API_TOKEN: ${estado(config.portal.apiToken)}`);
 
   getPool()
     .then(() => console.log(`[db] Connected to ${config.db.database} on ${config.db.server}`))

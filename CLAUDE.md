@@ -55,7 +55,8 @@ src/
                                     (whatsapp_business_account / instagram / page)
   services/
     claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos / enviar_fotos_articulo (queues Articulos.imagenes URLs; the controller sends them as WhatsApp images right before the text reply) / escalar_a_humano / crear_pedido / buscar_pedidos_cliente
-    metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage / sendTypingIndicator
+    metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage / sendTypingIndicator (axios with 15 s timeout)
+    colaChatService.js            Per-chat queue: debounce + batch consecutive messages, serial per chat, global concurrency cap, per-number rate limit
     conversationService.js        Azure SQL-backed history (Mensajes table, never trimmed); getHistory() reads back only the last MAX_HISTORY rows
     clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
     articuloService.js            Queries Articulos + Stock for a Cliente (buscar_articulos), logs every search to ConsultasArticulo
@@ -77,11 +78,12 @@ SQL scripts live outside the repo: append every new script (idempotent, dated he
 ### Webhook flow
 
 1. Meta sends POST to `/webhook` with `x-hub-signature-256` header.
-2. A scoped stream-reader middleware on `/webhook` captures raw bytes directly from the HTTP socket into `req.rawBody`, then manually parses JSON into `req.body`.
+2. A scoped stream-reader middleware on `/webhook` captures raw bytes directly from the HTTP socket into `req.rawBody` (capped at 1 MB → 413, since it runs before the signature check), then manually parses JSON into `req.body`.
 3. `validateMetaSignature` verifies HMAC-SHA256 of `req.rawBody` against the header.
-4. Controller responds `200` immediately (Meta requires < 20 s), then processes async.
-5. `buildReply()` appends the user message to history, calls Claude, appends the assistant reply, and returns the text.
-6. `metaService` sends the reply via the appropriate Graph API endpoint.
+4. Controller responds `200` immediately (Meta requires < 20 s), then processes async. The Cliente is resolved by `phone_number_id` (`usp_Bot_ClienteResolverPorPhoneNumberId`), falling back to the display number the first time.
+5. `procesarMensajeWhatsApp()` saves the user message right away (the Portal sees it even if the bot won't answer) and hands it to `colaChatService`: per chat it waits 2 s after the last message (max 8 s), then answers **once** for all of them; never two replies in parallel for the same chat; max 5 Claude replies in flight overall; more than 10 msgs/min or 60/hour from one number → saved but not answered (`rate_limit` log). All of this is in memory (single instance).
+6. `responderLote()` → `buildReply()` calls Claude with the history (user messages >2000 chars are trimmed for Claude only), saves the assistant reply and returns the text; `metaService` sends it (texts >4096 chars are split).
+7. Tool safety: `crear_pedido` input is validated in JS (1–30 items, integer qty 1–100, notas ≤500), only one order per reply, and an identical order from the same number within 10 min is refused; `escalar_a_humano` only uses `pedidoId` if that order belongs to the sender (`pedidoService.esDelCliente`). Tool errors reach Claude as a generic text (details only in the log). `buscar_articulos` returns at most 15 results ordered by relevance (words in the name first, out-of-stock last) and tells Claude when there are more; LIKE wildcards in the search words are escaped. `MensajesWhatsAppProcesados` is purged daily (>30 days, `dedupeService.iniciarPurga`).
 
 ### Critical: middleware order in index.js
 

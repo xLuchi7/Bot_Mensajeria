@@ -12,9 +12,34 @@ async function resolveClienteIdByPhone(phoneNumber) {
   return result.recordset[0]?.id ?? null;
 }
 
+// El Cliente se busca primero por phone_number_id (el id fijo que manda Meta) y,
+// si todavía no lo tenemos guardado (primer mensaje), por el número visible, que es
+// texto con formato y puede cambiar. Devuelve { clienteId, porTelefono }.
+let sinProcedurePorId = false;
+async function resolverCliente(phoneNumberId, displayPhoneNumber) {
+  if (phoneNumberId && !sinProcedurePorId) {
+    try {
+      const r = await ejecutar('dbo.usp_Bot_ClienteResolverPorPhoneNumberId', { phoneNumberId: [sql.NVarChar(50), String(phoneNumberId)] });
+      if (r.recordset.length === 1) return { clienteId: r.recordset[0].id, porTelefono: false };
+    } catch (err) {
+      // Todavía no se corrió el SQL nuevo: se sigue con el número visible, como antes.
+      if (/Could not find stored procedure/i.test(err.message)) sinProcedurePorId = true;
+      else throw err;
+    }
+  }
+  const clienteId = await resolveClienteIdByPhone(displayPhoneNumber);
+  return { clienteId, porTelefono: Boolean(clienteId) };
+}
+
 async function getContextoNegocio(clienteId) {
   const result = await ejecutar('dbo.usp_Bot_ClienteContexto', { clienteId: [sql.Int, clienteId] });
   return result.recordset[0]?.contextoNegocio ?? null;
+}
+
+// Pares pregunta → respuesta que el negocio cargó desde el portal (Aprendizajes).
+async function getAprendizajes(clienteId) {
+  const result = await ejecutar('dbo.usp_Bot_AprendizajesActivos', { clienteId: [sql.Int, clienteId] });
+  return result.recordset;
 }
 
 async function getEmail(clienteId) {
@@ -71,4 +96,4 @@ async function minutosDesdeCliente(clienteId, userId) {
   return result.recordset[0]?.minutos ?? null;
 }
 
-module.exports = { resolveClienteIdByPhone, getContextoNegocio, getEmail, botPuedeResponder, guardarPhoneNumberId, getDatosEnvio, guardarNombrePerfil, minutosDesdeCliente };
+module.exports = { resolveClienteIdByPhone, resolverCliente, getContextoNegocio, getAprendizajes, getEmail, botPuedeResponder, guardarPhoneNumberId, getDatosEnvio, guardarNombrePerfil, minutosDesdeCliente };

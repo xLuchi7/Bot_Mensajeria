@@ -96,26 +96,53 @@ const tools = [
 ];
 
 async function buildSystemPrompt(clienteId) {
-  const contexto = await cliente.getContextoNegocio(clienteId);
-  if (!contexto) return BASE_PROMPT;
+  const [contexto, aprendizajes] = await Promise.all([
+    cliente.getContextoNegocio(clienteId),
+    // Si la tabla todavía no existe o falla la lectura, el bot sigue respondiendo sin aprendizajes.
+    cliente.getAprendizajes(clienteId).catch(err => {
+      console.warn(`[claude] No se pudieron leer los aprendizajes del cliente ${clienteId}: ${err.message}`);
+      return [];
+    }),
+  ]);
 
-  return `${BASE_PROMPT}
+  let prompt = BASE_PROMPT;
+  if (contexto) {
+    prompt += `
 
 Información y preferencias de este negocio en particular. Si acá piden algo distinto a la sección "Estilo" de arriba (por ejemplo, usar emojis, un tono distinto, o terminar los mensajes de alguna forma en particular), priorizá lo que pidan acá por sobre esa sección. El resto de las instrucciones (catálogo, pedidos, escalamientos, etc.) siempre se respeta igual, esto no las cambia:
 ${contexto}`;
+  }
+  // Van al final y en orden fijo: el system prompt queda igual entre mensajes y se lee de caché.
+  if (aprendizajes.length) {
+    prompt += `
+
+Respuestas aprendidas de este negocio (las cargó el equipo del negocio a partir de consultas reales). Cuando el cliente pregunte algo que coincida con una de estas, respondé según lo indicado, con tus palabras y adaptado a la conversación. No reemplazan a las tools: precios, stock y pedidos se consultan siempre con ellas.
+${aprendizajes.map(a => `- P: ${a.pregunta}\n  R: ${a.respuesta}`).join('\n')}`;
+  }
+  return prompt;
 }
 
 // Tope de fotos por respuesta, para no inundar el chat.
 const MAX_FOTOS_POR_RESPUESTA = 8;
 const MAX_FOTOS_POR_ARTICULO = 5;
 
+// El detalle técnico de un error (SQL, procedures...) queda en el log; a Claude solo
+// le llega un aviso genérico, que podría terminar repitiéndole al cliente.
+function errorInterno(que, err) {
+  console.error(`[claude] Error al ${que}:`, err.message);
+  return `Error: no se pudo ${que} en este momento. Pedile disculpas al cliente y ofrecele que alguien del equipo lo contacte (escalar_a_humano).`;
+}
+
+// Si Claude no devuelve texto (se cortó por max_tokens o se negó), algo hay que mandar.
+const TEXTO_VACIO = 'Perdón, ¿me lo podés repetir con otras palabras? Quiero asegurarme de entenderte bien.';
+
 // `fotos` junta lo que hay que mandar: se envía recién cuando la respuesta está
 // lista (y si el bot no se apagó en el medio), no en el momento de la tool.
 // Cada tool queda en Logs con lo que pidió Claude, lo que se le devolvió y cuánto tardó.
-async function ejecutarTool(clienteId, userId, block, fotos) {
+async function ejecutarTool(clienteId, userId, block, fotos, turno) {
   console.log(`[claude] Tool call: ${block.name} — cliente=${clienteId} user=${userId} input=${JSON.stringify(block.input)}`);
   const inicio = Date.now();
-  const resultado = await correrTool(clienteId, userId, block, fotos);
+  const resultado = await correrTool(clienteId, userId, block, fotos, turno);
   const fallo = /^(Error|No se pudo|Tool desconocida)/.test(resultado);
   logs.registrar(fallo ? 'warn' : 'info', `tool_${block.name}`, {
     clienteId, userId,
@@ -125,7 +152,7 @@ async function ejecutarTool(clienteId, userId, block, fotos) {
   return resultado;
 }
 
-async function correrTool(clienteId, userId, block, fotos) {
+async function correrTool(clienteId, userId, block, fotos, turno) {
   if (block.name === 'enviar_fotos_articulo') {
     try {
       const articulo = await articulos.obtenerFotos(clienteId, block.input.nombre);
@@ -140,14 +167,15 @@ async function correrTool(clienteId, userId, block, fotos) {
       fotos.push({ nombre: articulo.nombre, urls });
       return `Listo: ${urls.length === 1 ? 'la foto le llega' : `las ${urls.length} fotos le llegan`} justo antes de tu mensaje.`;
     } catch (err) {
-      return `Error al buscar las fotos: ${err.message}`;
+      return errorInterno('buscar las fotos', err);
     }
   }
 
   if (block.name === 'buscar_articulos') {
     try {
-      const rows = await articulos.buscarArticulos(clienteId, block.input.texto);
-      await articulos.registrarConsulta(clienteId, userId, block.input.texto, rows);
+      const texto = String(block.input?.texto || '').slice(0, 200); // ConsultasArticulo.textoBuscado es NVARCHAR(200)
+      const rows = await articulos.buscarArticulos(clienteId, texto);
+      await articulos.registrarConsulta(clienteId, userId, texto, rows);
 
       if (!rows.length) return 'No se encontraron artículos que coincidan.';
 
@@ -164,29 +192,42 @@ async function correrTool(clienteId, userId, block, fotos) {
         disponibilidad: usaStock ? `${cantidad} en stock` : 'siempre disponible (sin control de stock)',
         fotos: imagenes.length,
       }));
-      return JSON.stringify(paraClaude);
+      // Si quedaron resultados afuera, que pida más detalle en vez de inventar que no hay.
+      return rows.hayMas
+        ? `${JSON.stringify(paraClaude)}\n(Hay más artículos que coinciden: estos son los ${rows.length} más relevantes. Si no está lo que busca, pedile más detalle —modelo, talle, color— y buscá de nuevo.)`
+        : JSON.stringify(paraClaude);
     } catch (err) {
-      return `Error al consultar el catálogo: ${err.message}`;
+      return errorInterno('consultar el catálogo', err);
     }
   }
 
   if (block.name === 'escalar_a_humano') {
     try {
-      const { motivo, pedidoId } = block.input;
-      await escalamientos.registrarEscalamiento(clienteId, userId, motivo, pedidoId ?? null);
-      if (pedidoId) await pedidos.marcarComoReclamado(clienteId, pedidoId);
+      const motivo = String(block.input?.motivo || '').trim().slice(0, 480) || 'Sin detalle';
+      // El pedidoId lo pone Claude: solo se usa si ese pedido es de este número.
+      const pedidoPedido = Number(block.input?.pedidoId);
+      const pedidoId = (await pedidos.esDelCliente(clienteId, userId, pedidoPedido)) ? pedidoPedido : null;
+      if (block.input?.pedidoId != null && !pedidoId) {
+        console.warn(`[claude] escalar_a_humano con un pedido que no es de este cliente (${block.input.pedidoId}): se registra sin pedido.`);
+      }
+      await escalamientos.registrarEscalamiento(clienteId, userId, motivo, pedidoId);
+      if (pedidoId) await pedidos.marcarComoReclamado(clienteId, pedidoId, userId);
       return 'Escalamiento registrado. Avisale al cliente que alguien del equipo se va a contactar pronto.';
     } catch (err) {
-      return `Error al registrar el escalamiento: ${err.message}`;
+      return errorInterno('registrar el reclamo', err);
     }
   }
 
   if (block.name === 'crear_pedido') {
+    // Un solo pedido por respuesta: si Claude pide crear dos, el segundo es casi
+    // seguro un duplicado del mismo pedido.
+    if (turno.pedidoCreado) return 'Ya creaste un pedido en esta respuesta: no crees otro. Si el cliente quiere sumar algo, confirmalo con él en el próximo mensaje.';
     try {
-      const resultado = await pedidos.crearPedido(clienteId, userId, block.input.items, block.input.notas);
+      const resultado = await pedidos.crearPedido(clienteId, userId, block.input?.items, block.input?.notas);
       if (!resultado.ok) {
         return `No se pudo crear el pedido:\n${resultado.errores.join('\n')}`;
       }
+      turno.pedidoCreado = true;
 
       // No se espera esta promesa: si el mail tarda o falla, no tiene que
       // demorar ni romper la confirmación del pedido por WhatsApp.
@@ -196,7 +237,7 @@ async function correrTool(clienteId, userId, block, fotos) {
 
       return `Pedido #${resultado.pedidoId} creado con éxito. Total: $${resultado.total}.`;
     } catch (err) {
-      return `Error al crear el pedido: ${err.message}`;
+      return errorInterno('crear el pedido', err);
     }
   }
 
@@ -206,7 +247,7 @@ async function correrTool(clienteId, userId, block, fotos) {
       await pedidos.registrarConsultaPedido(clienteId, userId, rows);
       return rows.length ? JSON.stringify(rows) : 'Este cliente no tiene pedidos registrados.';
     } catch (err) {
-      return `Error al consultar los pedidos: ${err.message}`;
+      return errorInterno('consultar los pedidos', err);
     }
   }
 
@@ -222,6 +263,7 @@ async function correrTool(clienteId, userId, block, fotos) {
 async function generateResponse(clienteId, userId, messages) {
   const conversationMessages = [...messages];
   const fotos = [];
+  const turno = { pedidoCreado: false };
   const systemPrompt = await buildSystemPrompt(clienteId);
   // inputTokens = todo lo que entró (sin caché + leído de caché + escrito en caché),
   // así en Mensajes se ve el tamaño real del prompt.
@@ -288,7 +330,7 @@ async function generateResponse(clienteId, userId, messages) {
     });
 
     if (response.stop_reason !== 'tool_use') {
-      const text = response.content.find(block => block.type === 'text')?.text ?? '';
+      const text = response.content.find(block => block.type === 'text')?.text?.trim() || TEXTO_VACIO;
       return { text, fotos, inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null };
     }
 
@@ -313,7 +355,7 @@ async function generateResponse(clienteId, userId, messages) {
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: await ejecutarTool(clienteId, userId, block, fotos),
+        content: await ejecutarTool(clienteId, userId, block, fotos, turno),
       });
     }
 
