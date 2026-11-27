@@ -9,10 +9,14 @@ const pedidos = require('./pedidoService');
 const email = require('./emailService');
 const revision = require('./revisionService');
 const logs = require('./logService');
+const pasajes = require('./pasajesService');
+const linkCompra = require('./linkCompraService');
 const { costoUsd } = require('../config/precios');
 
 const client = new Anthropic({ apiKey: config.anthropic.apiKey });
 const BASE_PROMPT = fs.readFileSync(path.join(__dirname, '../../prompts/base.txt'), 'utf8');
+// Perfil 'pasajes' (Clientes.tipoNegocio): otro prompt base y otras tools (pasajesService).
+const PROMPT_PASAJES = fs.readFileSync(path.join(__dirname, '../../prompts/pasajes.txt'), 'utf8');
 
 const tools = [
   {
@@ -95,7 +99,80 @@ const tools = [
   },
 ];
 
-async function buildSystemPrompt(clienteId) {
+// Venta por link de compra (Shopify): reemplaza a crear_pedido. El link lo agrega el
+// código al final del mensaje, Claude nunca escribe la URL (podría cambiarle algo).
+const toolLinkCompra = {
+  name: 'enviar_link_compra',
+  description: 'Genera el link de compra de la tienda online con el carrito ya armado y se lo manda al cliente para que complete sus datos de envío y pague. Llamala ÚNICAMENTE después de que el cliente confirmó explícitamente el pedido (dijo que sí a tu resumen). Nunca la llames en el mismo mensaje donde recién le proponés el pedido. El link se agrega solo al final de tu mensaje: no escribas ninguna URL vos.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      items: {
+        type: 'array',
+        description: 'Artículos que confirmó el cliente',
+        items: {
+          type: 'object',
+          properties: {
+            nombre: { type: 'string', description: 'Nombre exacto del artículo, tal como lo devolvió buscar_articulos' },
+            cantidad: { type: 'integer', minimum: 1 },
+          },
+          required: ['nombre', 'cantidad'],
+        },
+      },
+    },
+    required: ['items'],
+  },
+};
+const toolsLinkCompra = tools.map(t => (t.name === 'crear_pedido' ? toolLinkCompra : t));
+
+// Reemplaza la sección "Cómo tomar pedidos" de base.txt cuando el negocio vende por link.
+const PEDIDOS_POR_LINK = `Cómo tomar pedidos (este negocio vende con link de compra de su tienda online):
+- Cuando el cliente quiera comprar algo, primero armá el pedido usando datos reales de buscar_articulos (nunca inventes precios).
+- Antes de mandar nada, resumilo en un mensaje de texto normal y pedí confirmación explícita: por ejemplo "¿Te armo el pedido con: 2x Auriculares Bluetooth ($50.000)? Total: $50.000 más el envío". NO llames a ninguna tool en este mensaje.
+- Recién en tu SIGUIENTE respuesta, si el cliente confirmó que sí, llamá a enviar_link_compra con los artículos y cantidades exactas que confirmó. Si pidió cambios, volvé a resumir y pedir confirmación antes.
+- El link se agrega solo al final de tu mensaje: NO escribas ninguna URL ni inventes links. Escribí un mensaje corto diciendo que le dejás el link con su pedido ya cargado, donde completa sus datos de envío y paga, y que el pedido queda confirmado cuando termina la compra ahí.
+- No le pidas dirección, nombre ni datos de pago por WhatsApp: todo eso lo completa en el link.
+- Si enviar_link_compra devuelve un error (por ejemplo, no hay stock suficiente), explicaselo con naturalidad y ofrecé alternativas — no digas que le mandaste el link si no fue así.
+- Si el cliente quiere cambiar algo después de recibir el link, armá el pedido de nuevo, confirmalo y mandá un link nuevo.
+- Si el cliente dice que el link no le funciona o tiene problemas para pagar, pasá el caso a alguien del equipo con escalar_a_humano.
+- Nunca digas que un pedido quedó confirmado o pagado: eso pasa recién cuando completa la compra en el link.`;
+
+function seccionPedidosPorLink(prompt) {
+  const inicio = prompt.indexOf('Cómo tomar pedidos:');
+  const fin = prompt.indexOf('Consultas de estado de un pedido:');
+  if (inicio === -1 || fin <= inicio) return `${prompt}\n\n${PEDIDOS_POR_LINK}`;
+  return `${prompt.slice(0, inicio)}${PEDIDOS_POR_LINK}\n\n${prompt.slice(fin)}`;
+}
+
+const TEXTO_LINK = 'Te dejo el link con tu pedido ya cargado. Ahí completás tus datos de envío y pagás:';
+
+// Mensaje final cuando se generó un link: lo que escribió Claude (sin URLs, por si
+// igual escribió alguna) + el link real en su propia línea.
+function conLink(texto, link) {
+  const limpio = String(texto || '').replace(/https?:\/\/\S+/gi, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return `${limpio && limpio !== TEXTO_VACIO ? limpio : TEXTO_LINK}\n\n${link.url}`;
+}
+
+// Pasajes: escalar_a_humano y pasar_a_revision_humana son las mismas; catálogo y pedidos no aplican.
+const TOOLS_COMUNES_PASAJES = new Set(['escalar_a_humano', 'pasar_a_revision_humana']);
+const toolsPasajes = [...pasajes.tools, ...tools.filter(t => TOOLS_COMUNES_PASAJES.has(t.name))];
+
+function toolsDe(negocio, checkout) {
+  if (negocio.tipoNegocio === 'pasajes') return toolsPasajes;
+  return checkout ? toolsLinkCompra : tools;
+}
+
+// "viernes 27/11/2026" en hora de Argentina: para pasajes Claude tiene que saber qué día es
+// ("el viernes", "mañana"). Solo el día (no la hora): así el prompt cambia una vez por día y se sigue leyendo de caché.
+function hoyArgentina() {
+  const ahora = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  const dia = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'][ahora.getUTCDay()];
+  const dos = n => String(n).padStart(2, '0');
+  return `${dia} ${dos(ahora.getUTCDate())}/${dos(ahora.getUTCMonth() + 1)}/${ahora.getUTCFullYear()}`;
+}
+
+async function buildSystemPrompt(clienteId, negocio, checkout) {
+  const esPasajes = negocio.tipoNegocio === 'pasajes';
   const [contexto, aprendizajes] = await Promise.all([
     cliente.getContextoNegocio(clienteId),
     // Si la tabla todavía no existe o falla la lectura, el bot sigue respondiendo sin aprendizajes.
@@ -105,19 +182,24 @@ async function buildSystemPrompt(clienteId) {
     }),
   ]);
 
-  let prompt = BASE_PROMPT;
+  let prompt = esPasajes ? PROMPT_PASAJES : checkout ? seccionPedidosPorLink(BASE_PROMPT) : BASE_PROMPT;
   if (contexto) {
     prompt += `
 
-Información y preferencias de este negocio en particular. Si acá piden algo distinto a la sección "Estilo" de arriba (por ejemplo, usar emojis, un tono distinto, o terminar los mensajes de alguna forma en particular), priorizá lo que pidan acá por sobre esa sección. El resto de las instrucciones (catálogo, pedidos, escalamientos, etc.) siempre se respeta igual, esto no las cambia:
+Información y preferencias de este negocio en particular. Si acá piden algo distinto a la sección "Estilo" de arriba (por ejemplo, usar emojis, un tono distinto, o terminar los mensajes de alguna forma en particular), priorizá lo que pidan acá por sobre esa sección. El resto de las instrucciones (${esPasajes ? 'viajes, reservas' : 'catálogo, pedidos'}, escalamientos, etc.) siempre se respeta igual, esto no las cambia:
 ${contexto}`;
   }
   // Van al final y en orden fijo: el system prompt queda igual entre mensajes y se lee de caché.
   if (aprendizajes.length) {
     prompt += `
 
-Respuestas aprendidas de este negocio (las cargó el equipo del negocio a partir de consultas reales). Cuando el cliente pregunte algo que coincida con una de estas, respondé según lo indicado, con tus palabras y adaptado a la conversación. No reemplazan a las tools: precios, stock y pedidos se consultan siempre con ellas.
+Respuestas aprendidas de este negocio (las cargó el equipo del negocio a partir de consultas reales). Cuando el cliente pregunte algo que coincida con una de estas, respondé según lo indicado, con tus palabras y adaptado a la conversación. No reemplazan a las tools: ${esPasajes ? 'viajes, asientos y precios' : 'precios, stock y pedidos'} se consultan siempre con ellas.
 ${aprendizajes.map(a => `- P: ${a.pregunta}\n  R: ${a.respuesta}`).join('\n')}`;
+  }
+  if (esPasajes) {
+    prompt += `
+
+Hoy es ${hoyArgentina()} (Argentina). Usalo para entender "hoy", "mañana", "el viernes", etc. y pasar las fechas a buscar_viajes.`;
   }
   return prompt;
 }
@@ -153,6 +235,10 @@ async function ejecutarTool(clienteId, userId, block, fotos, turno) {
 }
 
 async function correrTool(clienteId, userId, block, fotos, turno) {
+  if (turno.negocio?.tipoNegocio === 'pasajes' && pasajes.NOMBRES.has(block.name)) {
+    return pasajes.ejecutar(turno.negocio, clienteId, userId, block, turno);
+  }
+
   if (block.name === 'enviar_fotos_articulo') {
     try {
       const articulo = await articulos.obtenerFotos(clienteId, block.input.nombre);
@@ -241,10 +327,33 @@ async function correrTool(clienteId, userId, block, fotos, turno) {
     }
   }
 
+  if (block.name === 'enviar_link_compra') {
+    if (!turno.checkout) return 'Tool desconocida: enviar_link_compra';
+    if (turno.linkCompra) return 'Ya generaste el link de compra en esta respuesta: no generes otro. Si el cliente quiere cambiar algo, confirmalo con él en el próximo mensaje.';
+    try {
+      const resultado = await linkCompra.crearLink(clienteId, userId, turno.checkout, block.input?.items);
+      if (!resultado.ok) return `No se pudo generar el link:\n${resultado.errores.join('\n')}`;
+      turno.linkCompra = resultado;
+      const resumen = resultado.items.map(i => `${i.cantidad}x ${i.nombre}`).join(', ');
+      return `Link de compra generado (${resumen}; total de productos $${resultado.total}, sin el envío). El link se agrega automáticamente al final de tu mensaje: NO escribas ninguna URL. Escribí un mensaje corto para acompañarlo.`;
+    } catch (err) {
+      return errorInterno('generar el link de compra', err);
+    }
+  }
+
   if (block.name === 'buscar_pedidos_cliente') {
     try {
       const rows = await pedidos.buscarPedidosCliente(clienteId, userId);
       await pedidos.registrarConsultaPedido(clienteId, userId, rows);
+      if (turno.checkout) {
+        // Con venta por link, las compras están en la tienda (LinksCompra), no en Pedidos.
+        const compras = await linkCompra.comprasDeCliente(clienteId, userId).catch((err) => {
+          console.error('[claude] No se pudieron leer las compras por link:', err.message);
+          return [];
+        });
+        if (!rows.length && !compras.length) return 'Este cliente no tiene pedidos ni compras registradas.';
+        return JSON.stringify({ ...(rows.length ? { pedidos: rows } : {}), ...(compras.length ? { comprasPorLink: compras } : {}) });
+      }
       return rows.length ? JSON.stringify(rows) : 'Este cliente no tiene pedidos registrados.';
     } catch (err) {
       return errorInterno('consultar los pedidos', err);
@@ -263,8 +372,13 @@ async function correrTool(clienteId, userId, block, fotos, turno) {
 async function generateResponse(clienteId, userId, messages) {
   const conversationMessages = [...messages];
   const fotos = [];
-  const turno = { pedidoCreado: false };
-  const systemPrompt = await buildSystemPrompt(clienteId);
+  const negocio = await cliente.getNegocio(clienteId);
+  const checkout = negocio.tipoNegocio === 'pasajes' ? null : await linkCompra.getConfig(clienteId);
+  const turno = { pedidoCreado: false, negocio, derivacion: null, checkout, linkCompra: null };
+  const toolsDelNegocio = toolsDe(negocio, checkout);
+  const systemPrompt = await buildSystemPrompt(clienteId, negocio, checkout);
+  // Si se generó un link de compra, va pegado al final del mensaje que se manda.
+  const final = texto => (turno.linkCompra ? conLink(texto, turno.linkCompra) : texto);
   // inputTokens = todo lo que entró (sin caché + leído de caché + escrito en caché),
   // así en Mensajes se ve el tamaño real del prompt.
   let inputTokens = 0;
@@ -287,7 +401,7 @@ async function generateResponse(clienteId, userId, messages) {
         cache_control: { type: 'ephemeral' },
         system: systemPrompt,
         messages: conversationMessages,
-        tools,
+        tools: toolsDelNegocio,
       });
     } catch (err) {
       logs.error('claude_error', {
@@ -330,7 +444,7 @@ async function generateResponse(clienteId, userId, messages) {
     });
 
     if (response.stop_reason !== 'tool_use') {
-      const text = response.content.find(block => block.type === 'text')?.text?.trim() || TEXTO_VACIO;
+      const text = final(response.content.find(block => block.type === 'text')?.text?.trim() || TEXTO_VACIO);
       return { text, fotos, inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null };
     }
 
@@ -350,7 +464,7 @@ async function generateResponse(clienteId, userId, messages) {
     for (const block of response.content) {
       if (block.type !== 'tool_use') continue;
       if (block.name === 'escalar_a_humano') escalado = true;
-      if (block.name === 'crear_pedido') pedidoCreado = true;
+      if (block.name === 'crear_pedido' || block.name === 'enviar_link_compra') pedidoCreado = true;
       if (block.name === 'buscar_pedidos_cliente') consultoPedidos = true;
       toolResults.push({
         type: 'tool_result',
@@ -360,10 +474,17 @@ async function generateResponse(clienteId, userId, messages) {
     }
 
     conversationMessages.push({ role: 'user', content: toolResults });
+
+    // Pasajes: la reserva salió. Se corta acá, sin otra vuelta a Claude: el mensaje al
+    // cliente es el fijo de derivación y el controller pausa el chat para la persona asignada.
+    if (turno.derivacion) {
+      const text = pasajes.mensajeDerivacion(negocio, turno.derivacion);
+      return { text, fotos: [], inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null, derivacion: turno.derivacion };
+    }
   }
 
   logs.warn('claude_sin_respuesta', { clienteId, userId, detalle: 'Se llegó al tope de 5 vueltas de tools sin respuesta final' });
-  return { text: 'Lo siento, no pude procesar tu consulta en este momento.', fotos: [], inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null };
+  return { text: turno.linkCompra ? final('') : 'Lo siento, no pude procesar tu consulta en este momento.', fotos: turno.linkCompra ? fotos : [], inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null };
 }
 
 module.exports = { generateResponse };

@@ -142,4 +142,4 @@ async function marcarComoReclamado(clienteId, pedidoId, userId) {
   return cambio;
 }
 
-module.exports = { crearPedido, buscarPedidosCliente, esDelCliente, registrarConsultaPedido, marcarComoReclamado };
+module.exports = { crearPedido, buscarPedidosCliente, esDelCliente, registrarConsultaPedido, marcarComoReclamado, validarItems };

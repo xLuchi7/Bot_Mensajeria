@@ -9,12 +9,14 @@ const escalamientos = require('../services/escalamientoService');
 const revision = require('../services/revisionService');
 const logs = require('../services/logService');
 const cola = require('../services/colaChatService');
+const portalAviso = require('../services/portalAvisoService');
 
 // Lo que va a Claude por mensaje: un texto gigante gasta tokens sin sumar nada.
 const MAX_TEXTO_CLAUDE = 2000;
 // El reclamo automático (PATRON_RECLAMO) se registra como mucho una vez cada 6 h por chat.
 const RECLAMO_AUTO_CADA_MS = 6 * 60 * 60 * 1000;
 const ultimoReclamoAuto = new Map(); // `${clienteId}:${userId}` -> ms
+const ESPERA_DERIVACION_MS = 2500;
 
 // Red de seguridad: si el modelo no llama a la tool escalar_a_humano pero el
 // mensaje suena a reclamo, lo registramos igual — perder un reclamo real cuesta
@@ -237,6 +239,9 @@ async function responderLote(clienteId, phoneNumberId, userId, lote, marcarLeido
   await meta.sendTypingIndicator(phoneNumberId, ultimo.waMessageId);
   const respuesta = await buildReply(clienteId, 'whatsapp', userId, text, { marcarLeido });
   if (respuesta === null) return;
+  // Derivación de una venta (pasajes): el mensaje es siempre el mismo y sale al instante; se
+  // espera un poco con el "escribiendo..." prendido para que no parezca automático.
+  if (respuesta.derivacion) await new Promise(r => setTimeout(r, ESPERA_DERIVACION_MS));
   await enviarFotos(phoneNumberId, userId, respuesta.fotos);
   await meta.sendWhatsAppMessage(phoneNumberId, userId, respuesta.text);
   console.log(`[whatsapp] Reply sent to ${userId}`);
@@ -311,6 +316,18 @@ function recortarHistorial(history) {
     : m));
 }
 
+// Pasajes: después de la Reserva Bot el chat lo sigue la persona que asignó el sistema
+// externo (Derivación de Ventas). Se pausa el bot SIN marcar revisión humana; el sistema
+// lo reactiva al vender o liberar la reserva. Nunca tira error: el mensaje sale igual.
+async function derivarVenta(clienteId, userId, derivacion) {
+  try {
+    await cliente.pausarChat(clienteId, userId, `Bot (venta derivada a ${derivacion.asignadaA || 'sin asignar'}, Reserva Bot N° ${derivacion.idReserva})`);
+    portalAviso.avisar(clienteId, 'chat', userId);
+  } catch (err) {
+    console.error(`[pasajes] No se pudo pausar el chat ${userId} después de la reserva:`, err.message);
+  }
+}
+
 function reclamoAutoPermitido(clienteId, userId) {
   const clave = `${clienteId}:${userId}`;
   const ultimo = ultimoReclamoAuto.get(clave) || 0;
@@ -337,9 +354,12 @@ async function buildReply(clienteId, platform, userId, text, { marcarLeido } = {
     const history = recortarHistorial(await conversation.getHistory(clienteId, userId));
     marcarLeido?.();
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const { text: reply, fotos, inputTokens, outputTokens, costoUsd, escalado, pedidoCreado, consultoPedidos, revisionHumana } = await claude.generateResponse(clienteId, userId, history);
-    if (await seApagoMientrasTanto(clienteId, userId)) return null;
+    const { text: reply, fotos, inputTokens, outputTokens, costoUsd, escalado, pedidoCreado, consultoPedidos, revisionHumana, derivacion } = await claude.generateResponse(clienteId, userId, history);
+    // La reserva ya está hecha en el sistema externo: aunque hayan apagado el bot mientras tanto,
+    // el cliente tiene que enterarse de que tiene el lugar guardado.
+    if (!derivacion && await seApagoMientrasTanto(clienteId, userId)) return null;
     if (revisionHumana) await revision.activar(clienteId, userId, revisionHumana, text);
+    if (derivacion) await derivarVenta(clienteId, userId, derivacion);
     if (fotos.length) {
       await conversation.addMessage(clienteId, userId, 'assistant', notaFotos(fotos), platform);
     }
@@ -360,7 +380,7 @@ async function buildReply(clienteId, platform, userId, text, { marcarLeido } = {
       console.warn(`[pedido] Posible pedido "fantasma" — la respuesta suena a confirmación pero no se llamó crear_pedido: "${reply.slice(0, 80)}"`);
     }
 
-    return { text: reply, fotos, revisionHumana, modelo: config.anthropic.model, inputTokens, outputTokens, costoUsd };
+    return { text: reply, fotos, revisionHumana, derivacion, modelo: config.anthropic.model, inputTokens, outputTokens, costoUsd };
   } catch (err) {
     // Antes acá se borraba todo el historial del número (DELETE en Mensajes) para
     // "resetear" la conversación, pero Mensajes es también el historial que ve el

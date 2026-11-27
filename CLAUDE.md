@@ -57,6 +57,7 @@ src/
     claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos / enviar_fotos_articulo (queues Articulos.imagenes URLs; the controller sends them as WhatsApp images right before the text reply) / escalar_a_humano / crear_pedido / buscar_pedidos_cliente
     metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage / sendTypingIndicator (axios with 15 s timeout)
     colaChatService.js            Per-chat queue: debounce + batch consecutive messages, serial per chat, global concurrency cap, per-number rate limit
+    pasajesService.js             Profile 'pasajes': tools that call the Cliente's own API (viajes, asientos, promociones, reservar) + fixed derivation message
     conversationService.js        Azure SQL-backed history (Mensajes table, never trimmed); getHistory() reads back only the last MAX_HISTORY rows
     clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
     articuloService.js            Queries Articulos + Stock for a Cliente (buscar_articulos), logs every search to ConsultasArticulo
@@ -143,6 +144,19 @@ The prompt is no longer a single env var. `prompts/base.txt` holds the general, 
 The append isn't a bare concatenation — it's prefixed with a line that explicitly gives `contextoNegocio` priority over the base prompt's "Estilo" section specifically (so a Cliente can ask for emojis, a different tone, a fixed sign-off, etc., overriding that section) while every other instruction (catalog handling, order flow, escalation, tool-calling rules) stays non-negotiable. Testing showed this framing matters: without a clear section break telling the model these are instructions to weigh (not just background text), even style requests that didn't conflict with anything (e.g. "terminate every message with '!!!'") were silently ignored.
 
 Azure SQL requires the connecting IP to be allow-listed in the server's firewall (Networking blade in the Azure portal). Since the bot runs on Railway (not Azure), the "Allow Azure services" toggle doesn't help — Railway's outbound IP (or an open range, if Railway has no static IP on the current plan) needs to be added explicitly.
+
+### Checkout link sales (Shopify)
+
+When the Cliente has Shopify connected and `ShopifyConexiones.linkCompra = 1` (`linkCompraService.getConfig`, cached 30 s; `usp_Bot_LinkCompraConfig`), `crear_pedido` is swapped for `enviar_link_compra` and the "Cómo tomar pedidos" section of `base.txt` is replaced (`seccionPedidosPorLink`). The tool resolves the confirmed items to Shopify variants (`usp_Bot_LinkCompraArticulos`: exact name, active, stock), builds a cart permalink `https://{shop}.myshopify.com/cart/{variant}:{qty},...?attributes[whatsapp]=TOKEN&ref=wa-TOKEN` and saves it in `LinksCompra` (`usp_Bot_LinkCompraCrear`). **Claude never writes the URL**: `generateResponse` strips any URL from the reply and appends the real link on its own line. Same cart from the same number within 10 min reuses the link. The Portal links the Shopify order back by the token (orders webhooks). `buscar_pedidos_cliente` also returns these purchases (`usp_Bot_LinkCompraDeCliente`).
+
+### Business profile 'pasajes' (Aguirre SRL)
+
+`Clientes.tipoNegocio` = `'articulos'` (default, everything above) or `'pasajes'`: a bus-ticket company with its own ERP (`../AguirreSRL`). Read per reply via `clienteService.getNegocio()` (cached 30 s; falls back to 'articulos' if the SQL wasn't run).
+
+- `claudeService` swaps the base prompt (`prompts/pasajes.txt` + today's date in Argentina, day only so the cache survives) and the tools: `pasajesService.tools` (`buscar_viajes`, `ver_asientos`, `ver_promociones`, `reservar_pasajes`) + `escalar_a_humano` + `pasar_a_revision_humana`. No catalog, no Pedidos.
+- The bot never touches the ERP database: tools call its API (`Clientes.apiExternaUrl` + `/viajes`, `/asientos`, `/promociones`, `/reservar`, Bearer `Clientes.apiExternaToken`). The ERP applies its seat rules and assigns the sale to a person by turn (Reserva Bot / Derivacion de Ventas).
+- When `reservar_pasajes` succeeds the loop stops (like `pasar_a_revision_humana`): the reply is the FIXED derivation message built by code (`pasajesService.mensajeDerivacion`, `Clientes.mensajeDerivacion` or the default, variables `{nombre} {destino} {fecha} {horario} {asientos} {usuario}`), sent after 2.5 s of typing indicator; `derivarVenta()` pauses the chat (`usp_Bot_ChatPausar`, NOT revision humana). The ERP reactivates the bot when the reservation is sold, released or expires.
+- `portalAvisoService` also posts events to `{apiExternaUrl}/eventos` (live updates of the ERP's WhatsApp IA module), and `/portal/*` accepts the Cliente's `apiExternaToken` besides `PORTAL_API_TOKEN`, scoped to that `clienteId` (so the ERP can send manual replies without the global token).
 
 ### Adding a new platform
 

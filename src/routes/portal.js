@@ -13,18 +13,33 @@ const router = Router();
 const VENTANA_HORAS = 24; // WhatsApp solo deja mandar texto libre hasta 24 h después del último mensaje del cliente
 const MAX_LARGO = 4096; // límite de la Cloud API para un mensaje de texto
 
-function autorizado(req) {
-  const esperado = config.portal.apiToken;
-  const recibido = (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+function igualesSeguro(esperado, recibido) {
   if (!esperado || !recibido) return false;
   const a = Buffer.from(esperado);
   const b = Buffer.from(recibido);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-router.use((req, res, next) => {
-  if (!config.portal.apiToken) return res.status(503).json({ ok: false, error: 'sin_configurar' });
-  if (!autorizado(req)) return res.status(401).json({ ok: false, error: 'no_autorizado' });
+// Dos llaves: PORTAL_API_TOKEN (el Portal, cualquier Cliente) o el apiExternaToken de
+// UN Cliente (su sistema propio, ej. AguirreSRL), que solo sirve para ese clienteId.
+async function autorizado(req) {
+  const recibido = (req.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (igualesSeguro(config.portal.apiToken, recibido)) return true;
+  const clienteId = parseInt(req.body?.clienteId, 10);
+  if (!clienteId || !recibido) return false;
+  const negocio = await cliente.getNegocio(clienteId);
+  return igualesSeguro(negocio.apiExternaToken, recibido);
+}
+
+router.use(async (req, res, next) => {
+  try {
+    if (!(await autorizado(req))) {
+      return res.status(config.portal.apiToken ? 401 : 503).json({ ok: false, error: config.portal.apiToken ? 'no_autorizado' : 'sin_configurar' });
+    }
+  } catch (err) {
+    console.error('[portal] Error validando el token:', err.message);
+    return res.status(500).json({ ok: false, error: 'error_interno' });
+  }
   // Los logs de este pedido del Portal quedan con su Cliente, chat y usuario.
   const clienteId = parseInt(req.body?.clienteId, 10) || null;
   const userId = typeof req.body?.userId === 'string' ? req.body.userId : null;

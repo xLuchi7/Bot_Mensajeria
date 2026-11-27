@@ -96,4 +96,42 @@ async function minutosDesdeCliente(clienteId, userId) {
   return result.recordset[0]?.minutos ?? null;
 }
 
-module.exports = { resolveClienteIdByPhone, resolverCliente, getContextoNegocio, getAprendizajes, getEmail, botPuedeResponder, guardarPhoneNumberId, getDatosEnvio, guardarNombrePerfil, minutosDesdeCliente };
+// Perfil del negocio: tipoNegocio 'articulos' (catálogo de Articulos, el de siempre) o
+// 'pasajes' (vende pasajes consultando la API de un sistema externo, ver pasajesService).
+// Se lee en cada respuesta: se guarda 30 s por Cliente para no ir a la base cada vez.
+// Si todavía no se corrió el SQL nuevo (no existe el procedure), queda 'articulos'.
+const NEGOCIO_CACHE_MS = 30 * 1000;
+const negocios = new Map(); // clienteId -> { datos, hasta }
+const NEGOCIO_POR_DEFECTO = { tipoNegocio: 'articulos', apiExternaUrl: null, apiExternaToken: null, mensajeDerivacion: null };
+async function getNegocio(clienteId) {
+  const guardado = negocios.get(clienteId);
+  if (guardado && guardado.hasta > Date.now()) return guardado.datos;
+  let datos = NEGOCIO_POR_DEFECTO;
+  try {
+    const result = await ejecutar('dbo.usp_Bot_ClienteNegocio', { clienteId: [sql.Int, clienteId] });
+    const fila = result.recordset[0];
+    if (fila) {
+      datos = {
+        tipoNegocio: fila.tipoNegocio === 'pasajes' ? 'pasajes' : 'articulos',
+        apiExternaUrl: fila.apiExternaUrl ? String(fila.apiExternaUrl).replace(/\/+$/, '') : null,
+        apiExternaToken: fila.apiExternaToken || null,
+        mensajeDerivacion: fila.mensajeDerivacion || null,
+      };
+    }
+  } catch (err) {
+    if (!/Could not find stored procedure/i.test(err.message)) throw err;
+  }
+  negocios.set(clienteId, { datos, hasta: Date.now() + NEGOCIO_CACHE_MS });
+  return datos;
+}
+
+// Pausa el bot en un chat sin marcarlo como revisión humana (ej. derivación de una venta a una persona).
+async function pausarChat(clienteId, userId, por) {
+  await ejecutar('dbo.usp_Bot_ChatPausar', {
+    clienteId: [sql.Int, clienteId],
+    userId: [sql.NVarChar(100), userId],
+    por: [sql.NVarChar(255), String(por).slice(0, 255)],
+  });
+}
+
+module.exports = { resolveClienteIdByPhone, resolverCliente, getContextoNegocio, getAprendizajes, getEmail, botPuedeResponder, guardarPhoneNumberId, getDatosEnvio, guardarNombrePerfil, minutosDesdeCliente, getNegocio, pausarChat };
