@@ -89,6 +89,29 @@ async function marcar(clienteId, userId, { tipo, motivo }, textoCliente) {
   console.log(`[revision] Chat ${userId} (cliente ${clienteId}) pasó a revisión humana: ${detalle}`);
 }
 
+// Pasa el pedido de persona a "Atendido" (mismo procedure que usa el Portal al
+// responder desde ahí). El bot sigue pausado: se reactiva aparte desde el Portal.
+// Devuelve true si cambió (false = no estaba pendiente). Nunca tira error.
+async function atender(clienteId, userId, por) {
+  try {
+    const r = await ejecutar('dbo.usp_Portal_HumanoSolicitadoEstado', {
+      clienteId: [sql.Int, clienteId],
+      userId: [sql.NVarChar(100), userId],
+      estado: [sql.NVarChar(20), 'atendido'],
+      por: [sql.NVarChar(255), por ? String(por).slice(0, 255) : null],
+    });
+    const cambio = (r.recordset[0]?.cambiados || 0) > 0;
+    if (cambio) {
+      portalAviso.avisar(clienteId, 'revision', userId);
+      logs.info('revision_humana_atendida', { clienteId, userId, detalle: { por } });
+    }
+    return cambio;
+  } catch (err) {
+    console.error(`[revision] No se pudo marcar como atendido el chat ${userId} (cliente ${clienteId}):`, err.message);
+    return false;
+  }
+}
+
 async function datosAlerta(clienteId, userId) {
   const r = await ejecutar('dbo.usp_Bot_RevisionHumanaDatosAlerta', {
     clienteId: [sql.Int, clienteId],
@@ -136,4 +159,4 @@ async function alertar(phoneNumberId, clienteId, userId, { tipo, motivo }, texto
   }
 }
 
-module.exports = { MENSAJE_ESPERA, TIPOS, detectar, activar, alertar };
+module.exports = { MENSAJE_ESPERA, TIPOS, detectar, activar, atender, alertar };

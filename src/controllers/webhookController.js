@@ -68,6 +68,10 @@ async function handleMessage(req, res) {
 
 async function processWhatsApp(entry) {
   for (const change of entry.changes || []) {
+    if (change.field === 'smb_message_echoes') {
+      await procesarEcos(change.value || {});
+      continue;
+    }
     if (change.field !== 'messages') continue;
 
     const { metadata, messages = [], contacts = [], statuses = [] } = change.value || {};
@@ -99,6 +103,38 @@ async function processWhatsApp(entry) {
       await logs.conContexto({ clienteId, userId: msg.from }, () =>
         procesarMensajeWhatsApp(clienteId, phoneNumberId, msg, contacts));
     }
+  }
+}
+
+// Coexistencia (número usado a la vez en la app WhatsApp Business y en la API):
+// lo que el negocio escribe desde el celular llega como "eco" (campo
+// smb_message_echoes; hay que tenerlo suscripto en el webhook de la app de Meta).
+// Se guarda en Mensajes como lo que manda una persona desde el Portal (role
+// 'assistant' + enviadoPor), así se ve en el chat y el bot tiene el contexto, y si
+// ese chat esperaba una persona pasa a "Atendido". El bot sigue pausado.
+const ENVIADO_DESDE_CELULAR = 'Celular (WhatsApp Business)';
+
+async function procesarEcos({ metadata, message_echoes: ecos = [] }) {
+  if (!ecos.length) return;
+  const clienteId = await cliente.resolveClienteIdByPhone(metadata?.display_phone_number);
+  if (!clienteId) {
+    console.error(`[whatsapp] Eco de un número sin Cliente registrado (${metadata?.display_phone_number}) — se ignora`);
+    return;
+  }
+
+  for (const eco of ecos) {
+    const userId = eco.to;
+    if (!userId) continue;
+    await logs.conContexto({ clienteId, userId }, async () => {
+      if (await dedupe.yaFueProcesado(eco.id)) return;
+
+      const texto = eco.type === 'text' ? eco.text?.body : null;
+      logs.info('mensaje_desde_celular', { detalle: { waMessageId: eco.id, tipo: eco.type, texto, timestamp: eco.timestamp } });
+      if (texto) {
+        await conversation.addMessage(clienteId, userId, 'assistant', texto, 'whatsapp', { enviadoPor: ENVIADO_DESDE_CELULAR });
+      }
+      await revision.atender(clienteId, userId, ENVIADO_DESDE_CELULAR);
+    });
   }
 }
 
