@@ -10,6 +10,7 @@ const revision = require('../services/revisionService');
 const logs = require('../services/logService');
 const cola = require('../services/colaChatService');
 const portalAviso = require('../services/portalAvisoService');
+const horario = require('../services/horarioService');
 
 // Lo que va a Claude por mensaje: un texto gigante gasta tokens sin sumar nada.
 const MAX_TEXTO_CLAUDE = 2000;
@@ -212,6 +213,14 @@ async function procesarMensajeWhatsApp(clienteId, phoneNumberId, msg, contacts) 
     return;
   }
 
+  // Fuera del horario de atención del Cliente: queda guardado y se responde a la hora de
+  // apertura (horarioService levanta de Mensajes todo lo que quedó sin responder).
+  if (!(await horario.estaAbierto(clienteId))) {
+    console.log(`[whatsapp] Fuera de horario: ${userId} queda para la apertura`);
+    logs.info('fuera_de_horario', { detalle: { waMessageId: msg.id } });
+    return;
+  }
+
   const clave = `${clienteId}:${userId}`;
   if (!cola.dentroDelLimite(clave)) {
     console.warn(`[whatsapp] ${userId} superó el límite de mensajes: no se responde (el mensaje quedó guardado).`);
@@ -224,6 +233,16 @@ async function procesarMensajeWhatsApp(clienteId, phoneNumberId, msg, contacts) 
     logs.conContexto({ clienteId, userId }, () => responderLote(clienteId, phoneNumberId, userId, lote, marcarLeido)));
 }
 
+// A la hora de apertura: los mensajes que llegaron con el negocio cerrado entran a la cola
+// del chat como si recién llegaran (si en ese momento escribe algo nuevo, se junta todo).
+function responderPendientes(clienteId, phoneNumberId, userId, items) {
+  const clave = `${clienteId}:${userId}`;
+  for (const item of items) {
+    cola.agendar(clave, item, (lote, marcarLeido) =>
+      logs.conContexto({ clienteId, userId }, () => responderLote(clienteId, phoneNumberId, userId, lote, marcarLeido)));
+  }
+}
+
 // Responde de una vez a los mensajes juntados de un chat.
 async function responderLote(clienteId, phoneNumberId, userId, lote, marcarLeido) {
   // Pudieron apagar el bot (o atender el chat a mano) mientras se juntaban.
@@ -234,14 +253,21 @@ async function responderLote(clienteId, phoneNumberId, userId, lote, marcarLeido
   }
 
   const text = lote.map(m => m.texto).join('\n');
-  const ultimo = lote[lote.length - 1];
+  const ultimo = lote.findLast(m => m.waMessageId);
+  const fueraDeHorario = lote.some(m => m.fueraDeHorario);
   const inicio = Date.now();
-  await meta.sendTypingIndicator(phoneNumberId, ultimo.waMessageId);
-  const respuesta = await buildReply(clienteId, 'whatsapp', userId, text, { marcarLeido });
+  // Los pendientes de la noche no tienen el id de WhatsApp (no se guarda en Mensajes).
+  if (ultimo) await meta.sendTypingIndicator(phoneNumberId, ultimo.waMessageId);
+  const respuesta = await buildReply(clienteId, 'whatsapp', userId, text, { marcarLeido, fueraDeHorario });
   if (respuesta === null) return;
   // Derivación de una venta (pasajes): el mensaje es siempre el mismo y sale al instante; se
   // espera un poco con el "escribiendo..." prendido para que no parezca automático.
   if (respuesta.derivacion) await new Promise(r => setTimeout(r, ESPERA_DERIVACION_MS));
+  // Falló Claude: no se le manda nada al cliente, solo el aviso al negocio.
+  if (!respuesta.text) {
+    if (respuesta.revisionHumana) await revision.alertar(phoneNumberId, clienteId, userId, respuesta.revisionHumana, text);
+    return;
+  }
   await enviarFotos(phoneNumberId, userId, respuesta.fotos);
   await meta.sendWhatsAppMessage(phoneNumberId, userId, respuesta.text);
   console.log(`[whatsapp] Reply sent to ${userId}`);
@@ -252,6 +278,7 @@ async function responderLote(clienteId, phoneNumberId, userId, lote, marcarLeido
     detalle: {
       texto: respuesta.text,
       mensajesJuntados: lote.length,
+      fueraDeHorario,
       fotos: respuesta.fotos.reduce((n, f) => n + f.urls.length, 0),
       modelo: respuesta.modelo ?? null,
       inputTokens: respuesta.inputTokens ?? 0,
@@ -340,10 +367,12 @@ function reclamoAutoPermitido(clienteId, userId) {
 // Devuelve { text, fotos, revisionHumana } a enviar, o null si el bot se apagó mientras se generaba.
 // El mensaje del cliente ya está guardado (procesarMensajeWhatsApp). `text` son
 // los mensajes juntados, para las detecciones; Claude los ve en el historial.
-async function buildReply(clienteId, platform, userId, text, { marcarLeido } = {}) {
-  // Pide una persona o está insultando: sin pasar por Claude, se pausa el chat y
-  // se le pide que espere (ver revisionService).
-  const detectado = revision.detectar(text);
+async function buildReply(clienteId, platform, userId, text, { marcarLeido, fueraDeHorario = false } = {}) {
+  // Pide una persona o está insultando (y en pasajes, cualquier reclamo): sin pasar por
+  // Claude, se pausa el chat y se le pide que espere (ver revisionService).
+  const negocio = await cliente.getNegocio(clienteId);
+  const esPasajes = negocio.tipoNegocio === 'pasajes';
+  const detectado = revision.detectar(text, { pasajes: esPasajes });
   if (detectado) {
     await revision.activar(clienteId, userId, detectado, text);
     await conversation.addMessage(clienteId, userId, 'assistant', revision.MENSAJE_ESPERA, platform);
@@ -354,7 +383,7 @@ async function buildReply(clienteId, platform, userId, text, { marcarLeido } = {
     const history = recortarHistorial(await conversation.getHistory(clienteId, userId));
     marcarLeido?.();
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const { text: reply, fotos, inputTokens, outputTokens, costoUsd, escalado, pedidoCreado, consultoPedidos, revisionHumana, derivacion } = await claude.generateResponse(clienteId, userId, history);
+    const { text: reply, fotos, inputTokens, outputTokens, costoUsd, escalado, pedidoCreado, consultoPedidos, revisionHumana, derivacion } = await claude.generateResponse(clienteId, userId, history, { fueraDeHorario });
     // La reserva ya está hecha en el sistema externo: aunque hayan apagado el bot mientras tanto,
     // el cliente tiene que enterarse de que tiene el lugar guardado.
     if (!derivacion && await seApagoMientrasTanto(clienteId, userId)) return null;
@@ -370,7 +399,8 @@ async function buildReply(clienteId, platform, userId, text, { marcarLeido } = {
     });
     console.log(`[claude] Response for ${userId}: "${reply.slice(0, 80)}" (tokens in=${inputTokens} out=${outputTokens})`);
 
-    if (!escalado && !consultoPedidos && !revisionHumana && PATRON_RECLAMO.test(text) && reclamoAutoPermitido(clienteId, userId)) {
+    // Pasajes no usa Escalamientos: sus reclamos ya pasaron a revisión humana (regex de arriba o la tool).
+    if (!esPasajes && !escalado && !consultoPedidos && !revisionHumana && PATRON_RECLAMO.test(text) && reclamoAutoPermitido(clienteId, userId)) {
       console.warn(`[escalamiento] Fallback disparado — Claude no llamó la tool pero el mensaje parece un reclamo: "${text.slice(0, 80)}"`);
       await escalamientos.registrarEscalamiento(clienteId, userId, `[Auto-detectado] "${text.slice(0, 200)}"`);
       logs.warn('escalamiento_auto', { detalle: { mensaje: text } });
@@ -386,15 +416,16 @@ async function buildReply(clienteId, platform, userId, text, { marcarLeido } = {
     // "resetear" la conversación, pero Mensajes es también el historial que ve el
     // Portal y se perdía el chat entero. Ya no hace falta: getHistory() deja afuera
     // los mensajes de error y arma un historial válido aunque haya filas raras.
+    // Al cliente NUNCA se le manda un mensaje de error: no sale nada, el chat pasa a
+    // Atención Humana (bot pausado) y se avisa al número de alertas para que lo
+    // responda una persona.
     console.error(`[claude] API error for ${userId}:`, err.message);
+    logs.error('claude_error', { clienteId, userId, detalle: err.message });
     if (await seApagoMientrasTanto(clienteId, userId)) return null;
-    const errorReply = 'Lo siento, ocurrió un error al procesar tu mensaje. Por favor intenta de nuevo.';
-    await conversation.addMessage(clienteId, userId, 'assistant', errorReply, platform, {
-      esError: true,
-      modelo: config.anthropic.model,
-    });
-    return { text: errorReply, fotos: [], revisionHumana: null };
+    const datos = { tipo: 'error_bot', motivo: String(err.message || 'Error al generar la respuesta').slice(0, 300) };
+    await revision.activar(clienteId, userId, datos, text);
+    return { text: null, fotos: [], revisionHumana: datos };
   }
 }
 
-module.exports = { verify, handleMessage };
+module.exports = { verify, handleMessage, responderPendientes };

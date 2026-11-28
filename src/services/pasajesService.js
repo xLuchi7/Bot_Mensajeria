@@ -100,13 +100,27 @@ function recortar(texto) {
 
 function errorInterno(que, err) {
   console.error(`[pasajes] Error al ${que}:`, err.message);
-  return `Error: no se pudo ${que} en este momento. Pedile disculpas al cliente y ofrecele que alguien del equipo lo contacte (escalar_a_humano).`;
+  return `Error: no se pudo ${que} en este momento. Pedile disculpas al cliente y ofrecele que alguien del equipo lo contacte (si acepta o insiste, pasar_a_revision_humana con tipo accion_equipo).`;
 }
 
 const texto = (v, max) => String(v ?? '').trim().slice(0, max);
 
+// Foto del mapa ya mandada a ese chat para ese viaje: Claude vuelve a llamar a ver_asientos para confirmar el asiento
+// elegido y la foto no se repite por 20 minutos (en memoria: una sola instancia).
+const FOTO_REPETIR_MS = 20 * 60 * 1000;
+const fotosEnviadas = new Map();
+const claveFoto = (clienteId, userId, idViaje) => `${clienteId}:${userId}:${idViaje}`;
+function fotoReciente(clienteId, userId, idViaje) {
+  return Date.now() - (fotosEnviadas.get(claveFoto(clienteId, userId, idViaje)) || 0) < FOTO_REPETIR_MS;
+}
+function anotarFoto(clienteId, userId, idViaje) {
+  fotosEnviadas.set(claveFoto(clienteId, userId, idViaje), Date.now());
+  if (fotosEnviadas.size > 5000) fotosEnviadas.delete(fotosEnviadas.keys().next().value);
+}
+
 // Devuelve el texto para Claude. Si la reserva salió, deja los datos en turno.derivacion.
-async function ejecutar(negocio, clienteId, userId, block, turno) {
+// fotos: la cola de imágenes de la respuesta (claudeService); ver_asientos suma la foto del mapa si la API la manda (imagenUrl).
+async function ejecutar(negocio, clienteId, userId, block, turno, fotos = []) {
   const input = block.input || {};
 
   if (block.name === 'buscar_viajes') {
@@ -125,7 +139,18 @@ async function ejecutar(negocio, clienteId, userId, block, turno) {
     try {
       const r = await llamarApi(negocio, '/asientos', { idViaje });
       if (!r.ok) return 'Ese viaje ya no está disponible para reservar. Buscá los viajes de nuevo.';
-      return recortar(JSON.stringify({ viaje: r.viaje, libres: r.libres }));
+      // Foto del mapa de asientos (la genera el sistema del Cliente): sale por WhatsApp justo antes del texto, una vez por viaje
+      const imagenUrl = /^https:\/\//.test(String(r.imagenUrl || '')) ? r.imagenUrl : '';
+      const yaEnviada = fotoReciente(clienteId, userId, idViaje);
+      const conFoto = Boolean(imagenUrl) && !yaEnviada && !fotos.some(f => f.idViaje === idViaje);
+      if (conFoto) {
+        fotos.push({ nombre: texto(r.imagenTitulo, 200) || 'Asientos libres', urls: [imagenUrl], idViaje });
+        anotarFoto(clienteId, userId, idViaje);
+      }
+      const notaFoto = conFoto
+        ? '\n(La foto del mapa con los asientos libres de este viaje le llega al cliente justo antes de tu mensaje: no le listes todos los números, pedile que elija su asiento mirando la foto.)'
+        : (imagenUrl && yaEnviada ? '\n(La foto del mapa de este viaje ya se la mandaste hace un rato: no se la vuelvas a prometer.)' : '');
+      return recortar(JSON.stringify({ viaje: r.viaje, libres: r.libres })) + notaFoto;
     } catch (err) {
       return errorInterno('consultar los asientos', err);
     }

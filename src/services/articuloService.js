@@ -1,10 +1,16 @@
 const { ejecutar, sql } = require('./db');
 
-// Búsqueda naive de singular en español: "parlantes" -> "parlante", palabra por
-// palabra (no la frase entera), para que "parlantes bluetooth" matchee bien
-// contra textos que tienen "Parlante" en singular.
+// Búsqueda naive de singular en español, palabra por palabra (no la frase
+// entera), para que "parlantes bluetooth" matchee contra "Parlante". Los
+// plurales en "-es" pierden las dos letras ("solares" -> "solar", "leds" ->
+// "led"): con solo sacar la "s" quedaba "solare" y no matcheaba "Estaca Solar".
+// Recortar de más no pierde resultados (es un LIKE '%palabra%'): "calles" ->
+// "call" sigue matcheando "Calle".
 function singularizar(palabra) {
-  return palabra.length > 3 && palabra.toLowerCase().endsWith('s') ? palabra.slice(0, -1) : palabra;
+  const p = palabra.toLowerCase();
+  if (p.length > 4 && p.endsWith('es')) return palabra.slice(0, -2);
+  if (p.length > 3 && p.endsWith('s')) return palabra.slice(0, -1);
+  return palabra;
 }
 
 // Cada palabra tiene que aparecer en algún lado (nombre, descripción, código,
@@ -45,6 +51,23 @@ async function buscarArticulos(clienteId, texto) {
     imagenes: parsearImagenes(imagenes),
   }));
   return Object.assign(articulos, { hayMas: filas.length > MAX_RESULTADOS });
+}
+
+// Lo que hay para vender ahora (activo y con stock, o sin control de stock), para
+// cuando el cliente pide "info" en general. Usa el mismo procedure de búsqueda:
+// sin filtro se manda una palabra vacía (LIKE '%%' matchea todo); con filtro
+// (ej. "kids") se buscan esas palabras. Los agotados nunca se devuelven.
+const MAX_CATALOGO = 60;
+async function listarDisponibles(clienteId, filtro) {
+  const palabras = String(filtro || '').trim().split(/\s+/).filter(Boolean).slice(0, 8).map(singularizar).map(escaparLike);
+  const result = await ejecutar('dbo.usp_Bot_ArticulosBuscar', {
+    clienteId: [sql.Int, clienteId],
+    palabras: [sql.NVarChar(sql.MAX), JSON.stringify(palabras.length ? palabras : [''])],
+    max: [sql.Int, MAX_CATALOGO],
+  });
+  return result.recordset
+    .filter(r => !r.usaStock || Number(r.cantidad) > 0)
+    .map(({ imagenes, opciones, ...row }) => ({ ...row, opciones: parsearOpciones(opciones), imagenes: parsearImagenes(imagenes) }));
 }
 
 // Articulos.opciones: [{ nombre: "Talle", valor: "38" }] → "Talle: 38"
@@ -91,4 +114,4 @@ async function registrarConsulta(clienteId, userId, texto, rows) {
   });
 }
 
-module.exports = { buscarArticulos, registrarConsulta, obtenerFotos };
+module.exports = { buscarArticulos, listarDisponibles, registrarConsulta, obtenerFotos };

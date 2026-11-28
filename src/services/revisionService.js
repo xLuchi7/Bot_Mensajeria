@@ -15,6 +15,9 @@ const MENSAJE_ESPERA = 'Esperame un momento que lo estoy consultando y enseguida
 const TIPOS = {
   pide_persona: 'pidió hablar con una persona',
   agresion: 'está insultando o muy enojado',
+  accion_equipo: 'pidió algo que solo puede hacer el equipo (cancelar o modificar un pedido)',
+  error_bot: 'quedó sin respuesta por un error del bot',
+  reclamo: 'tiene un reclamo o un problema con un viaje o pasaje',
 };
 
 // Red de seguridad antes de llamar a Claude: si el texto es claro, no gastamos
@@ -32,6 +35,26 @@ const PATRON_AGRESION = new RegExp(String.raw`\b(` + [
   'garcas?', 'chorr[oa]s?', 'estafador(es|a|as)?', 'ladron(es)?', 'chupame', 'andate a la mierda', 'cagad[oa]s?',
 ].join('|') + String.raw`)\b`, 'i');
 
+// Cancelar/anular un pedido, una compra o una reserva: el bot no puede hacerlo, así
+// que va directo a una persona ("cancelenlo", "quiero cancelar mi pedido", "anulen la compra").
+// Prefiere el falso positivo (lo mira una persona) a que el bot siga respondiendo.
+const PATRON_ACCION_EQUIPO = new RegExp([
+  String.raw`\bcancel(a|ar|e|en|o)(lo|la|los|las|me|melo|mela)?\b`,
+  String.raw`\b(anul(a|ar|e|en)(lo|la|los|las|me)?|(dar|dame|denme|den|dan|das|des|darme|darlo|darla) de baja)\b.{0,40}\b(pedido|compra|orden|reserva|pasajes?)\b`,
+].join('|'), 'i');
+
+// Perfil pasajes: TODO reclamo va directo a una persona (revisión humana), nunca a un Escalamiento.
+// Se compara sobre el texto normalizado (sin tildes). Prefiere el falso positivo: lo mira una persona.
+const PATRON_RECLAMO_PASAJES = new RegExp([
+  String.raw`\b(reclamo|reclamos|reclamar|reclamarles|queja|quejas|quejarme|denuncia|denunciar|defensa del consumidor)\b`,
+  String.raw`\b(devolucion|devuelvan|devolver(me)?|reintegro|reembolso)\b`,
+  String.raw`\b(me cobraron|cobraron (de mas|mal|dos veces)|cobro (de mas|mal|doble))\b`,
+  String.raw`\b(no (salio|paso|vino|llego|aparecio) el (colectivo|micro|bondi|coche|chofer))\b`,
+  String.raw`\b(me dejo (el|en) (colectivo|micro|bondi)|me dejaron (a pie|en|tirad[oa]))\b`,
+  String.raw`\b(perdi|perdieron|rompieron|se perdio|me robaron)\b.{0,30}\b(valija|equipaje|bolso|mochila|maleta|encomienda)\b`,
+  String.raw`\b(mal(isimo)? servicio|pesimo|pesima atencion|una verguenza|vergonzoso|maltrat(o|aron|ado))\b`,
+].join('|'), 'i');
+
 function normalizar(texto) {
   return String(texto || '')
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -39,11 +62,14 @@ function normalizar(texto) {
     .replace(/(\w)\1{2,}/g, '$1');
 }
 
+/** opciones.pasajes: también detecta reclamos (Aguirre: un reclamo siempre lo atiende una persona) */
 /** @returns {{tipo: string, motivo: string} | null} */
-function detectar(texto) {
+function detectar(texto, { pasajes = false } = {}) {
   const t = normalizar(texto);
   if (PATRON_AGRESION.test(t)) return { tipo: 'agresion', motivo: 'Mensaje con insultos o agresivo (detectado automáticamente)' };
   if (PATRON_PIDE_PERSONA.test(t)) return { tipo: 'pide_persona', motivo: 'Pidió hablar con una persona (detectado automáticamente)' };
+  if (PATRON_ACCION_EQUIPO.test(t)) return { tipo: 'accion_equipo', motivo: 'Pidió cancelar un pedido o compra (detectado automáticamente)' };
+  if (pasajes && PATRON_RECLAMO_PASAJES.test(t)) return { tipo: 'reclamo', motivo: 'Mensaje con un reclamo (detectado automáticamente)' };
   return null;
 }
 

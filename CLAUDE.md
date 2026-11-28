@@ -54,10 +54,11 @@ src/
   controllers/webhookController.js  Dispatches by platform object type
                                     (whatsapp_business_account / instagram / page)
   services/
-    claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos / enviar_fotos_articulo (queues Articulos.imagenes URLs; the controller sends them as WhatsApp images right before the text reply) / escalar_a_humano / crear_pedido / buscar_pedidos_cliente
+    claudeService.js              Builds the system prompt (prompts/base.txt + Clientes.contextoNegocio) and runs the tool-use loop for buscar_articulos / ver_productos_disponibles (in-stock catalog for a generic "pasame info", reuses usp_Bot_ArticulosBuscar with an empty word, drops 0-stock rows) / enviar_fotos_articulo (queues Articulos.imagenes URLs; the controller sends them as WhatsApp images right before the text reply) / escalar_a_humano / crear_pedido / buscar_pedidos_cliente
     metaService.js                sendWhatsAppMessage / sendInstagramMessage / sendFacebookMessage / sendTypingIndicator (axios with 15 s timeout)
+    horarioService.js             Business hours per Cliente (Clientes.horarioBotDesde/Hasta, Argentina time, NULL = 24 h; usp_Bot_ClientesHorario, cached 30 s). Off hours the message is saved but not answered; every 30 s it checks for a new opening (and once on startup) and feeds the chats with unanswered messages since the closing (usp_Bot_PendientesFueraDeHorario: after the last assistant row, bot active, no human review, max 24 h) into colaChatService, so the reply reads the whole history once
     colaChatService.js            Per-chat queue: debounce + batch consecutive messages, serial per chat, global concurrency cap, per-number rate limit
-    pasajesService.js             Profile 'pasajes': tools that call the Cliente's own API (viajes, asientos, promociones, reservar) + fixed derivation message
+    pasajesService.js             Profile 'pasajes': tools that call the Cliente's own API (viajes, asientos, promociones, reservar) + fixed derivation message. If /asientos returns imagenUrl (https), the seat-map photo goes into the reply's photo queue (once per chat + viaje every 20 min, in memory)
     conversationService.js        Azure SQL-backed history (Mensajes table, never trimmed); getHistory() reads back only the last MAX_HISTORY rows
     clienteService.js             Resolves ClienteId from the WhatsApp number that received the message
     articuloService.js            Queries Articulos + Stock for a Cliente (buscar_articulos), logs every search to ConsultasArticulo
@@ -65,7 +66,7 @@ src/
     escalamientoService.js        Logs cases the bot hands off to a human (Escalamientos table)
     emailService.js               Emails the Cliente a summary when a Pedido is created (Gmail via nodemailer)
     dedupeService.js              Claims each inbound WhatsApp message id so Meta's webhook retries don't get processed twice
-    revisionService.js            "Revisión humana": regex (asks for a person / insults) checked before Claude + tool pasar_a_revision_humana. Replies MENSAJE_ESPERA, pauses the chat (Chats.botActivo=0, revisionHumana=1), logs an Escalamiento and WhatsApps Clientes.telefonoAlertas
+    revisionService.js            "Revisión humana": regex (asks for a person / insults / asks to cancel an order — tipo accion_equipo, the bot can't do it) checked before Claude + tool pasar_a_revision_humana. Replies MENSAJE_ESPERA, pauses the chat (Chats.botActivo=0, revisionHumana=1), logs an Escalamiento and WhatsApps Clientes.telefonoAlertas
     logService.js                 Logs table (shared with the Portal): buffered batch inserts, mirrors console.warn/error, purges rows older than 7 days
     db.js                         mssql connection pool (singleton via getPool()); resets itself on connect failure or a dropped pool instead of caching a broken connection forever
 ```
@@ -139,6 +140,8 @@ Neither `escalar_a_humano` nor `crear_pedido` are reliably called by the model j
 
 ### System prompt (base + per-Cliente context)
 
+`system` is two blocks: the fixed prompt (explicit cache breakpoint) and `momentoActual()` (day, hour range and the greeting to use — buen día 5–12, buenas tardes 12–20, buenas noches 20–5 — plus a note when answering off-hours messages). Hour-level granularity keeps the conversation cache valid within the hour; never put the time inside the fixed prompt.
+
 The prompt is no longer a single env var. `prompts/base.txt` holds the general, versioned behavior (tone, WhatsApp formatting, how to interpret `buscar_articulos` results) and is shared by every Cliente. `claudeService.buildSystemPrompt()` appends `Clientes.contextoNegocio` (business name, hours, policies, etc.) to that base before each call — so a client's personality is a DB update, not a redeploy. `Portal_Mensajeria` exposes this as a "Mi Negocio" page (free-text `<textarea>`) so each Cliente edits their own context directly instead of needing someone to run SQL.
 
 The append isn't a bare concatenation — it's prefixed with a line that explicitly gives `contextoNegocio` priority over the base prompt's "Estilo" section specifically (so a Cliente can ask for emojis, a different tone, a fixed sign-off, etc., overriding that section) while every other instruction (catalog handling, order flow, escalation, tool-calling rules) stays non-negotiable. Testing showed this framing matters: without a clear section break telling the model these are instructions to weigh (not just background text), even style requests that didn't conflict with anything (e.g. "terminate every message with '!!!'") were silently ignored.
@@ -153,7 +156,7 @@ When the Cliente has Shopify connected and `ShopifyConexiones.linkCompra = 1` (`
 
 `Clientes.tipoNegocio` = `'articulos'` (default, everything above) or `'pasajes'`: a bus-ticket company with its own ERP (`../AguirreSRL`). Read per reply via `clienteService.getNegocio()` (cached 30 s; falls back to 'articulos' if the SQL wasn't run).
 
-- `claudeService` swaps the base prompt (`prompts/pasajes.txt` + today's date in Argentina, day only so the cache survives) and the tools: `pasajesService.tools` (`buscar_viajes`, `ver_asientos`, `ver_promociones`, `reservar_pasajes`) + `escalar_a_humano` + `pasar_a_revision_humana`. No catalog, no Pedidos.
+- `claudeService` swaps the base prompt (`prompts/pasajes.txt` + today's date in Argentina, day only so the cache survives) and the tools: `pasajesService.tools` (`buscar_viajes`, `ver_asientos`, `ver_promociones`, `reservar_pasajes`) + its own `pasar_a_revision_humana` (extra tipo `reclamo`). No catalog, no Pedidos, NO `escalar_a_humano`/Escalamientos: every complaint goes to a person (revision humana), both from the tool and from `revisionService.detectar(text, { pasajes: true })` (`PATRON_RECLAMO_PASAJES`, before Claude). `PATRON_RECLAMO` (auto Escalamiento) is skipped for pasajes.
 - The bot never touches the ERP database: tools call its API (`Clientes.apiExternaUrl` + `/viajes`, `/asientos`, `/promociones`, `/reservar`, Bearer `Clientes.apiExternaToken`). The ERP applies its seat rules and assigns the sale to a person by turn (Reserva Bot / Derivacion de Ventas).
 - When `reservar_pasajes` succeeds the loop stops (like `pasar_a_revision_humana`): the reply is the FIXED derivation message built by code (`pasajesService.mensajeDerivacion`, `Clientes.mensajeDerivacion` or the default, variables `{nombre} {destino} {fecha} {horario} {asientos} {usuario}`), sent after 2.5 s of typing indicator; `derivarVenta()` pauses the chat (`usp_Bot_ChatPausar`, NOT revision humana). The ERP reactivates the bot when the reservation is sold, released or expires.
 - `portalAvisoService` also posts events to `{apiExternaUrl}/eventos` (live updates of the ERP's WhatsApp IA module), and `/portal/*` accepts the Cliente's `apiExternaToken` besides `PORTAL_API_TOKEN`, scoped to that `clienteId` (so the ERP can send manual replies without the global token).

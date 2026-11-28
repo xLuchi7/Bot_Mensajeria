@@ -90,4 +90,7 @@ app.listen(config.port, () => {
   getPool()
     .then(() => console.log(`[db] Connected to ${config.db.database} on ${config.db.server}`))
     .catch(err => console.error(`[db] Connection failed:`, err.message));
+
+  // Horario de atención: a la hora de apertura responde lo que llegó con el negocio cerrado.
+  require('./src/services/horarioService').iniciar(require('./src/controllers/webhookController').responderPendientes);
 });

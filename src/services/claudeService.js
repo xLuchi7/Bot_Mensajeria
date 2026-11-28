@@ -21,13 +21,24 @@ const PROMPT_PASAJES = fs.readFileSync(path.join(__dirname, '../../prompts/pasaj
 const tools = [
   {
     name: 'buscar_articulos',
-    description: 'Busca artículos en el catálogo del cliente por nombre, descripción o código, e informa precio y disponibilidad. Llamala SIEMPRE que te pregunten por un producto puntual, aunque ya hayas buscado algo parecido antes en la conversación, o aunque en un mensaje anterior ya hayas dicho que no tenían ese tipo de producto — esa respuesta anterior puede haber estado mal, no la repitas de memoria: confirmalo de nuevo con esta tool. Nunca respondas sobre stock o catálogo sin llamarla primero. El campo "disponibilidad" es info interna para vos (no se la repitas al cliente tal cual): te dice si hay stock (ej: "3 en stock", o "0 en stock" que significa agotado — avisá que está agotado, no digas que no existe en el catálogo) o si el artículo está siempre disponible sin control de stock (en ese caso ofrecelo con normalidad, sin mencionar la frase "sin control de stock").',
+    description: 'Busca artículos en el catálogo del cliente por nombre, descripción o código, e informa precio y disponibilidad. Llamala SIEMPRE que te pregunten por un producto puntual, aunque ya hayas buscado algo parecido antes en la conversación, o aunque en un mensaje anterior ya hayas dicho que no tenían ese tipo de producto — esa respuesta anterior puede haber estado mal, no la repitas de memoria: confirmalo de nuevo con esta tool. Nunca respondas sobre stock o catálogo sin llamarla primero. El campo "disponibilidad" es info interna para vos (no se la repitas al cliente tal cual): te dice si hay stock (ej: "3 en stock", o "0 en stock" que significa agotado — avisá que está agotado, no digas que no existe en el catálogo) o si el artículo está siempre disponible sin control de stock (en ese caso ofrecelo con normalidad, sin mencionar la frase "sin control de stock"). El campo "infoNegocio", si viene, es información que el negocio cargó especialmente para vos sobre ese producto (usos, medidas, cuidados, qué responder): usala como contexto confiable al contestar, con tus palabras; si dice "igual que X", es la misma info del artículo X.',
     input_schema: {
       type: 'object',
       properties: {
         texto: { type: 'string', description: 'Palabra clave para buscar, ej: "auriculares"' },
       },
       required: ['texto'],
+    },
+  },
+  {
+    name: 'ver_productos_disponibles',
+    description: 'Lista los productos que hay para vender AHORA (solo los que tienen stock), con precio. Usala cuando el cliente pide información en general, pregunta qué venden o qué tienen, y en la conversación NO se venía hablando de un producto puntual: en vez de preguntarle sobre qué producto quiere info, mostrale directamente lo disponible. Si pregunta por una línea, marca o categoría (ej. "kids", "iluminación"), pasala en filtro para traer solo esos. Si ya se venía hablando de un producto puntual, no uses esta: usá buscar_articulos para ESE producto.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        filtro: { type: 'string', description: 'Opcional: línea, marca o categoría que pidió el cliente, ej: "kids". Vacío = todo lo disponible.' },
+      },
+      required: [],
     },
   },
   {
@@ -55,11 +66,11 @@ const tools = [
   },
   {
     name: 'pasar_a_revision_humana',
-    description: 'Llamala cuando el cliente pida hablar con una persona, un humano, un asesor, el dueño o alguien del equipo, o cuando insulte, putee o esté muy agresivo. Al llamarla el chat pasa a una persona del equipo: no sigas la conversación ni escribas nada más (el sistema le responde al cliente que espere). No la uses para reclamos comunes donde el cliente no pidió una persona ni está agresivo: para eso está escalar_a_humano.',
+    description: 'Llamala cuando el cliente pida hablar con una persona, un humano, un asesor, el dueño o alguien del equipo, cuando insulte, putee o esté muy agresivo, o cuando pida algo que solo puede hacer el equipo y vos no: cancelar o anular un pedido/compra/reserva, modificar uno ya hecho, o un reembolso. Al llamarla el chat pasa a una persona del equipo: no sigas la conversación ni escribas nada más (el sistema le responde al cliente que espere). No la uses para reclamos comunes donde el cliente no pidió una persona ni está agresivo: para eso está escalar_a_humano.',
     input_schema: {
       type: 'object',
       properties: {
-        tipo: { type: 'string', enum: ['pide_persona', 'agresion'], description: 'pide_persona: pidió hablar con una persona. agresion: insulta o está muy agresivo.' },
+        tipo: { type: 'string', enum: ['pide_persona', 'agresion', 'accion_equipo'], description: 'pide_persona: pidió hablar con una persona. agresion: insulta o está muy agresivo. accion_equipo: pidió cancelar/modificar un pedido ya hecho, un reembolso u otra acción que solo puede hacer el equipo.' },
         motivo: { type: 'string', description: 'Resumen breve de lo que pasó, sin inventar datos' },
       },
       required: ['tipo', 'motivo'],
@@ -153,22 +164,42 @@ function conLink(texto, link) {
   return `${limpio && limpio !== TEXTO_VACIO ? limpio : TEXTO_LINK}\n\n${link.url}`;
 }
 
-// Pasajes: escalar_a_humano y pasar_a_revision_humana son las mismas; catálogo y pedidos no aplican.
-const TOOLS_COMUNES_PASAJES = new Set(['escalar_a_humano', 'pasar_a_revision_humana']);
-const toolsPasajes = [...pasajes.tools, ...tools.filter(t => TOOLS_COMUNES_PASAJES.has(t.name))];
+// Pasajes: catálogo y pedidos no aplican, y tampoco escalar_a_humano: TODO reclamo pasa a una
+// persona con pasar_a_revision_humana (tipo 'reclamo'), que pausa el chat y avisa al número de alertas.
+const toolRevisionBase = tools.find(t => t.name === 'pasar_a_revision_humana');
+const toolRevisionPasajes = {
+  ...toolRevisionBase,
+  description: 'Llamala cuando el cliente pida hablar con una persona, un humano, un asesor, el dueño o alguien del equipo; cuando insulte o esté muy agresivo; cuando tenga CUALQUIER reclamo o queja (un viaje que no salió o se demoró, un problema con el chofer, el colectivo o el equipaje, un cobro mal hecho, mala atención, etc.); o cuando pida algo que solo puede hacer el equipo: cancelar, cambiar o devolver un pasaje o una reserva, o un reembolso. Al llamarla el chat pasa a una persona del equipo: no sigas la conversación ni escribas nada más (el sistema le responde al cliente que espere).',
+  input_schema: {
+    ...toolRevisionBase.input_schema,
+    properties: {
+      ...toolRevisionBase.input_schema.properties,
+      tipo: { type: 'string', enum: ['pide_persona', 'agresion', 'reclamo', 'accion_equipo'], description: 'pide_persona: pidió hablar con una persona. agresion: insulta o está muy agresivo. reclamo: cualquier reclamo o queja. accion_equipo: pidió cancelar, cambiar o devolver un pasaje/reserva, un reembolso u otra acción que solo puede hacer el equipo.' },
+    },
+  },
+};
+const toolsPasajes = [...pasajes.tools, toolRevisionPasajes];
 
 function toolsDe(negocio, checkout) {
   if (negocio.tipoNegocio === 'pasajes') return toolsPasajes;
   return checkout ? toolsLinkCompra : tools;
 }
 
-// "viernes 27/11/2026" en hora de Argentina: para pasajes Claude tiene que saber qué día es
-// ("el viernes", "mañana"). Solo el día (no la hora): así el prompt cambia una vez por día y se sigue leyendo de caché.
-function hoyArgentina() {
+// Día, hora y saludo en hora de Argentina (UTC-3 fijo, sin horario de verano). Va en un
+// bloque aparte del system prompt, después del punto de caché: el prompt fijo (y las tools)
+// se siguen leyendo de caché aunque cambie la hora. Solo la hora (no los minutos): dentro
+// de la misma hora el bloque es igual y también se reusa la caché de la conversación.
+function momentoActual({ fueraDeHorario = false } = {}) {
   const ahora = new Date(Date.now() - 3 * 60 * 60 * 1000);
   const dia = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'][ahora.getUTCDay()];
   const dos = n => String(n).padStart(2, '0');
-  return `${dia} ${dos(ahora.getUTCDate())}/${dos(ahora.getUTCMonth() + 1)}/${ahora.getUTCFullYear()}`;
+  const hora = ahora.getUTCHours();
+  const saludo = hora >= 5 && hora < 12 ? 'buen día' : hora >= 12 && hora < 20 ? 'buenas tardes' : 'buenas noches';
+  let texto = `Momento actual (Argentina): ${dia} ${dos(ahora.getUTCDate())}/${dos(ahora.getUTCMonth() + 1)}/${ahora.getUTCFullYear()}, entre las ${dos(hora)}:00 y las ${dos(hora)}:59. Usalo para entender "hoy", "mañana", "el viernes", etc. Si saludás, decí "${saludo}".`;
+  if (fueraDeHorario) {
+    texto += ' Los últimos mensajes del cliente llegaron fuera del horario de atención y recién ahora se le responden: respondé todo lo que preguntó (podés disculparte en pocas palabras por la demora).';
+  }
+  return texto;
 }
 
 async function buildSystemPrompt(clienteId, negocio, checkout) {
@@ -186,7 +217,7 @@ async function buildSystemPrompt(clienteId, negocio, checkout) {
   if (contexto) {
     prompt += `
 
-Información y preferencias de este negocio en particular. Si acá piden algo distinto a la sección "Estilo" de arriba (por ejemplo, usar emojis, un tono distinto, o terminar los mensajes de alguna forma en particular), priorizá lo que pidan acá por sobre esa sección. El resto de las instrucciones (${esPasajes ? 'viajes, reservas' : 'catálogo, pedidos'}, escalamientos, etc.) siempre se respeta igual, esto no las cambia:
+Información y preferencias de este negocio en particular. Si acá piden algo distinto a la sección "Estilo" de arriba (por ejemplo, usar emojis, un tono distinto, o terminar los mensajes de alguna forma en particular), priorizá lo que pidan acá por sobre esa sección. El resto de las instrucciones (${esPasajes ? 'viajes, reservas' : 'leer la conversación, catálogo, pedidos'}, escalamientos, etc.) siempre se respeta igual, esto no las cambia: por ejemplo, si acá dice cómo presentarte o qué preguntar al empezar, eso aplica solo cuando la conversación recién empieza y el cliente todavía no dijo qué busca:
 ${contexto}`;
   }
   // Van al final y en orden fijo: el system prompt queda igual entre mensajes y se lee de caché.
@@ -196,12 +227,30 @@ ${contexto}`;
 Respuestas aprendidas de este negocio (las cargó el equipo del negocio a partir de consultas reales). Cuando el cliente pregunte algo que coincida con una de estas, respondé según lo indicado, con tus palabras y adaptado a la conversación. No reemplazan a las tools: ${esPasajes ? 'viajes, asientos y precios' : 'precios, stock y pedidos'} se consultan siempre con ellas.
 ${aprendizajes.map(a => `- P: ${a.pregunta}\n  R: ${a.respuesta}`).join('\n')}`;
   }
-  if (esPasajes) {
-    prompt += `
-
-Hoy es ${hoyArgentina()} (Argentina). Usalo para entender "hoy", "mañana", "el viernes", etc. y pasar las fechas a buscar_viajes.`;
-  }
   return prompt;
+}
+
+// Artículos como los ve Claude: sin el id interno ni los campos crudos de stock (la
+// disponibilidad va resumida en un solo campo legible). Con Shopify la descripción
+// llega completa y se repite en cada talle/color del mismo producto: se recorta.
+// infoBot (metacampo custom.info_bot de Shopify) es lo que el negocio escribió para
+// el bot: va más largo, y solo en el primer artículo que lo trae (las otras
+// variantes del producto lo referencian).
+function resumirArticulos(rows, { descripcion: maxDescripcion = 400, infoNegocio: maxInfo = 2000 } = {}) {
+  const corto = (texto, max) => (texto.length > max ? `${texto.slice(0, max)}…` : texto);
+  const infoVista = new Map();
+  return rows.map(({ articuloId, usaStock, cantidad, imagenes, descripcion, infoBot, precioComparacion, marca, opciones, ...resto }) => ({
+    ...resto,
+    ...(descripcion ? { descripcion: corto(descripcion, maxDescripcion) } : {}),
+    ...(infoBot ? (infoVista.has(infoBot)
+      ? { infoNegocio: `igual que "${infoVista.get(infoBot)}"` }
+      : (infoVista.set(infoBot, resto.nombre), { infoNegocio: corto(infoBot, maxInfo) })) : {}),
+    ...(precioComparacion && precioComparacion > resto.precio ? { precioAntes: precioComparacion } : {}),
+    ...(marca ? { marca } : {}),
+    ...(opciones ? { opciones } : {}),
+    disponibilidad: usaStock ? `${cantidad} en stock` : 'siempre disponible (sin control de stock)',
+    fotos: imagenes.length,
+  }));
 }
 
 // Tope de fotos por respuesta, para no inundar el chat.
@@ -236,7 +285,7 @@ async function ejecutarTool(clienteId, userId, block, fotos, turno) {
 
 async function correrTool(clienteId, userId, block, fotos, turno) {
   if (turno.negocio?.tipoNegocio === 'pasajes' && pasajes.NOMBRES.has(block.name)) {
-    return pasajes.ejecutar(turno.negocio, clienteId, userId, block, turno);
+    return pasajes.ejecutar(turno.negocio, clienteId, userId, block, turno, fotos);
   }
 
   if (block.name === 'enviar_fotos_articulo') {
@@ -265,23 +314,27 @@ async function correrTool(clienteId, userId, block, fotos, turno) {
 
       if (!rows.length) return 'No se encontraron artículos que coincidan.';
 
-      // No hace falta que Claude vea el id interno ni los campos crudos de stock —
-      // le resumimos la disponibilidad en un solo campo legible.
-      // Con Shopify la descripción llega completa y se repite en cada talle/color
-      // del mismo producto: se recorta para no gastar tokens de más.
-      const paraClaude = rows.map(({ articuloId, usaStock, cantidad, imagenes, descripcion, precioComparacion, marca, opciones, ...resto }) => ({
-        ...resto,
-        ...(descripcion ? { descripcion: descripcion.length > 400 ? `${descripcion.slice(0, 400)}…` : descripcion } : {}),
-        ...(precioComparacion && precioComparacion > resto.precio ? { precioAntes: precioComparacion } : {}),
-        ...(marca ? { marca } : {}),
-        ...(opciones ? { opciones } : {}),
-        disponibilidad: usaStock ? `${cantidad} en stock` : 'siempre disponible (sin control de stock)',
-        fotos: imagenes.length,
-      }));
+      const paraClaude = resumirArticulos(rows);
       // Si quedaron resultados afuera, que pida más detalle en vez de inventar que no hay.
       return rows.hayMas
         ? `${JSON.stringify(paraClaude)}\n(Hay más artículos que coinciden: estos son los ${rows.length} más relevantes. Si no está lo que busca, pedile más detalle —modelo, talle, color— y buscá de nuevo.)`
         : JSON.stringify(paraClaude);
+    } catch (err) {
+      return errorInterno('consultar el catálogo', err);
+    }
+  }
+
+  if (block.name === 'ver_productos_disponibles') {
+    try {
+      const filtro = String(block.input?.filtro || '').slice(0, 100);
+      const rows = await articulos.listarDisponibles(clienteId, filtro);
+      if (!rows.length) {
+        return filtro
+          ? `No hay productos disponibles que coincidan con "${filtro}". Probá ver_productos_disponibles sin filtro o buscar_articulos con otras palabras antes de decirle al cliente que no hay.`
+          : 'Ahora no hay productos con stock. No ofrezcas nada: decile que por el momento no hay stock y ofrecele avisarle cuando entre.';
+      }
+      // Descripción corta: es una lista para elegir, el detalle sale después con buscar_articulos.
+      return `${JSON.stringify(resumirArticulos(rows, { descripcion: 150, infoNegocio: 300 }))}\n(Estos son TODOS los productos con stock${filtro ? ` que coinciden con "${filtro}"` : ''}. Mostráselos al cliente en una lista corta con nombre y precio —si hay variantes del mismo producto, agrupalas— y preguntale cuál le interesa. No ofrezcas ningún producto que no esté en esta lista.)`;
     } catch (err) {
       return errorInterno('consultar el catálogo', err);
     }
@@ -369,14 +422,18 @@ async function correrTool(clienteId, userId, block, fotos, turno) {
  * @param {Array<{role: string, content: string}>} messages
  * @returns {Promise<{text: string, fotos: Array<{nombre: string, urls: string[]}>, inputTokens: number, outputTokens: number, costoUsd: number|null, escalado: boolean, pedidoCreado: boolean, consultoPedidos: boolean, revisionHumana: {tipo: string, motivo: string} | null}>}
  */
-async function generateResponse(clienteId, userId, messages) {
+async function generateResponse(clienteId, userId, messages, { fueraDeHorario = false } = {}) {
   const conversationMessages = [...messages];
   const fotos = [];
   const negocio = await cliente.getNegocio(clienteId);
   const checkout = negocio.tipoNegocio === 'pasajes' ? null : await linkCompra.getConfig(clienteId);
   const turno = { pedidoCreado: false, negocio, derivacion: null, checkout, linkCompra: null };
   const toolsDelNegocio = toolsDe(negocio, checkout);
-  const systemPrompt = await buildSystemPrompt(clienteId, negocio, checkout);
+  // [prompt fijo con punto de caché, momento actual]: ver momentoActual().
+  const systemPrompt = [
+    { type: 'text', text: await buildSystemPrompt(clienteId, negocio, checkout), cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: momentoActual({ fueraDeHorario }) },
+  ];
   // Si se generó un link de compra, va pegado al final del mensaje que se manda.
   const final = texto => (turno.linkCompra ? conLink(texto, turno.linkCompra) : texto);
   // inputTokens = todo lo que entró (sin caché + leído de caché + escrito en caché),
@@ -396,8 +453,8 @@ async function generateResponse(clienteId, userId, messages) {
         model: config.anthropic.model,
         max_tokens: config.anthropic.maxTokens,
         output_config: { effort: config.anthropic.effort },
-        // Caché automática: el system prompt y las tools son iguales en cada llamada,
-        // así que las siguientes se cobran mucho más barato.
+        // Caché: las tools y el prompt fijo (punto de caché en systemPrompt[0]) son iguales
+        // en cada llamada; la automática suma la conversación (sirve dentro de la misma hora).
         cache_control: { type: 'ephemeral' },
         system: systemPrompt,
         messages: conversationMessages,
@@ -484,7 +541,8 @@ async function generateResponse(clienteId, userId, messages) {
   }
 
   logs.warn('claude_sin_respuesta', { clienteId, userId, detalle: 'Se llegó al tope de 5 vueltas de tools sin respuesta final' });
-  return { text: turno.linkCompra ? final('') : 'Lo siento, no pude procesar tu consulta en este momento.', fotos: turno.linkCompra ? fotos : [], inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null };
+  if (!turno.linkCompra) throw new Error('Se llegó al tope de 5 vueltas de tools sin respuesta final');
+  return { text: final(''), fotos, inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null };
 }
 
 module.exports = { generateResponse };
