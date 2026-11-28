@@ -11,6 +11,7 @@ const logs = require('../services/logService');
 const cola = require('../services/colaChatService');
 const portalAviso = require('../services/portalAvisoService');
 const horario = require('../services/horarioService');
+const pasajes = require('../services/pasajesService');
 
 // Lo que va a Claude por mensaje: un texto gigante gasta tokens sin sumar nada.
 const MAX_TEXTO_CLAUDE = 2000;
@@ -175,6 +176,12 @@ async function procesarMensajeWhatsApp(clienteId, phoneNumberId, msg, contacts) 
   const userId = msg.from;
   const nombrePerfil = contacts.find(c => c.wa_id === userId)?.profile?.name;
 
+  // Menú de reserva (WhatsApp Flows) terminado: la reserva ya está hecha en el sistema del Cliente.
+  if (msg.type === 'interactive' && msg.interactive?.type === 'nfm_reply') {
+    await procesarRespuestaMenu(clienteId, phoneNumberId, msg);
+    return;
+  }
+
   if (msg.type !== 'text') {
     console.log(`[whatsapp] Ignored non-text message type: ${msg.type}`);
     logs.info('mensaje_no_texto', { detalle: { waMessageId: msg.id, tipo: msg.type, nombrePerfil, contenido: msg[msg.type] ?? null } });
@@ -233,6 +240,43 @@ async function procesarMensajeWhatsApp(clienteId, phoneNumberId, msg, contacts) 
     logs.conContexto({ clienteId, userId }, () => responderLote(clienteId, phoneNumberId, userId, lote, marcarLeido)));
 }
 
+// Respuesta del menú de reserva (nfm_reply): el sistema del Cliente ya creó la Reserva Bot en la última pantalla y manda sus datos en
+// response_json ({ flow_token, idReserva, derivacion }). Se contesta con el mensaje fijo de derivación y se pausa el chat, igual que
+// cuando reserva Claude, aunque el bot esté apagado (el cliente tiene que saber que tiene el lugar). El flow_token empieza con el número
+// del chat: si no coincide con quien lo manda, se ignora.
+async function procesarRespuestaMenu(clienteId, phoneNumberId, msg) {
+  const userId = msg.from;
+  if (await dedupe.yaFueProcesado(msg.id)) return;
+
+  let respuesta;
+  let derivacion;
+  try {
+    respuesta = JSON.parse(msg.interactive.nfm_reply?.response_json || '{}');
+    derivacion = JSON.parse(respuesta.derivacion || 'null');
+  } catch (err) {
+    logs.warn('menu_reserva_respuesta_invalida', { clienteId, userId, detalle: { error: err.message, contenido: msg.interactive } });
+    return;
+  }
+
+  const chatDelToken = String(respuesta.flow_token || '').split('.')[0];
+  if (!derivacion?.idReserva || chatDelToken !== String(userId).replace(/\D/g, '')) {
+    logs.warn('menu_reserva_respuesta_invalida', { clienteId, userId, detalle: { contenido: respuesta } });
+    return;
+  }
+
+  await logs.conContexto({ clienteId, userId }, async () => {
+    logs.info('reserva_bot_creada', { detalle: { origen: 'menu', idReserva: derivacion.idReserva, asignadaA: derivacion.asignadaA, estado: derivacion.estado, asientos: derivacion.asientos } });
+    await conversation.addMessage(clienteId, userId, 'user', `(Completó el menú de reserva: Reserva N° ${derivacion.idReserva})`, 'whatsapp');
+    const negocio = await cliente.getNegocio(clienteId);
+    const texto = pasajes.mensajeDerivacion(negocio, derivacion);
+    await derivarVenta(clienteId, userId, derivacion);
+    await meta.sendTypingIndicator(phoneNumberId, msg.id);
+    await new Promise(r => setTimeout(r, ESPERA_DERIVACION_MS));
+    await meta.sendWhatsAppMessage(phoneNumberId, userId, texto);
+    await conversation.addMessage(clienteId, userId, 'assistant', texto, 'whatsapp');
+  });
+}
+
 // A la hora de apertura: los mensajes que llegaron con el negocio cerrado entran a la cola
 // del chat como si recién llegaran (si en ese momento escribe algo nuevo, se junta todo).
 function responderPendientes(clienteId, phoneNumberId, userId, items) {
@@ -269,7 +313,12 @@ async function responderLote(clienteId, phoneNumberId, userId, lote, marcarLeido
     return;
   }
   await enviarFotos(phoneNumberId, userId, respuesta.fotos);
-  await meta.sendWhatsAppMessage(phoneNumberId, userId, respuesta.text);
+  if (respuesta.menu) {
+    await meta.sendWhatsAppFlow(phoneNumberId, userId, respuesta.menu);
+  }
+  else {
+    await meta.sendWhatsAppMessage(phoneNumberId, userId, respuesta.text);
+  }
   console.log(`[whatsapp] Reply sent to ${userId}`);
   // Resumen de toda la respuesta: lo que costó en total está acá en el detalle (el
   // costo por llamada, en las filas 'claude_llamada').
@@ -383,7 +432,7 @@ async function buildReply(clienteId, platform, userId, text, { marcarLeido, fuer
     const history = recortarHistorial(await conversation.getHistory(clienteId, userId));
     marcarLeido?.();
     console.log(`[claude] Calling API for ${platform} user ${userId} (history: ${history.length} msgs)`);
-    const { text: reply, fotos, inputTokens, outputTokens, costoUsd, escalado, pedidoCreado, consultoPedidos, revisionHumana, derivacion } = await claude.generateResponse(clienteId, userId, history, { fueraDeHorario });
+    const { text: reply, fotos, inputTokens, outputTokens, costoUsd, escalado, pedidoCreado, consultoPedidos, revisionHumana, derivacion, menu } = await claude.generateResponse(clienteId, userId, history, { fueraDeHorario });
     // La reserva ya está hecha en el sistema externo: aunque hayan apagado el bot mientras tanto,
     // el cliente tiene que enterarse de que tiene el lugar guardado.
     if (!derivacion && await seApagoMientrasTanto(clienteId, userId)) return null;
@@ -392,7 +441,9 @@ async function buildReply(clienteId, platform, userId, text, { marcarLeido, fuer
     if (fotos.length) {
       await conversation.addMessage(clienteId, userId, 'assistant', notaFotos(fotos), platform);
     }
-    await conversation.addMessage(clienteId, userId, 'assistant', reply, platform, {
+    // El menú queda en el historial con una nota, para que Claude sepa que ya lo mandó.
+    await conversation.addMessage(clienteId, userId, 'assistant', menu ? `${reply}
+(Se envió el botón del menú de reserva)` : reply, platform, {
       inputTokens,
       outputTokens,
       modelo: config.anthropic.model,
@@ -410,7 +461,7 @@ async function buildReply(clienteId, platform, userId, text, { marcarLeido, fuer
       console.warn(`[pedido] Posible pedido "fantasma" — la respuesta suena a confirmación pero no se llamó crear_pedido: "${reply.slice(0, 80)}"`);
     }
 
-    return { text: reply, fotos, revisionHumana, derivacion, modelo: config.anthropic.model, inputTokens, outputTokens, costoUsd };
+    return { text: reply, fotos, revisionHumana, derivacion, menu, modelo: config.anthropic.model, inputTokens, outputTokens, costoUsd };
   } catch (err) {
     // Antes acá se borraba todo el historial del número (DELETE en Mensajes) para
     // "resetear" la conversación, pero Mensajes es también el historial que ve el

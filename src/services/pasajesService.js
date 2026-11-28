@@ -8,7 +8,10 @@ const logs = require('./logService');
 //   /viajes { texto?, fechaDesde?, fechaHasta? }  viajes con lugares libres y precios
 //   /asientos { idViaje }                         asientos libres (cama / semicama)
 //   /promociones {}                               precios promo efectivo
-//   /reservar { telefonoWhatsApp, userIdChat, nombreContacto, dniContacto, observaciones, asientos: [...] }
+//   /reservar { telefonoWhatsApp, userIdChat, nombreContacto, dniContacto, observaciones, promoEfectivo, asientos: [...] }
+//   /menuReserva { userIdChat }                    menú de WhatsApp Flows (flowId, flowToken, textos); ok false = seguir por chat
+// Con el menú el cliente arma la reserva solo: Meta llama directo al endpoint del sistema en cada pantalla y al final
+// llega un mensaje interactive nfm_reply con la reserva (webhookController.procesarRespuestaMenu).
 // Después de reservar, el código (no Claude) manda MENSAJE_DERIVACION y pausa el
 // chat: sigue una persona del negocio (la que el sistema asignó), que cobra y
 // carga el pasaje. El sistema reactiva el bot en el chat al vender o liberar.
@@ -21,6 +24,11 @@ const MENSAJE_DERIVACION = '¡Perfecto, {nombre}! Ya te guardé el lugar para el
 const MENSAJE_DERIVACION_SIN_ASIGNAR = '¡Perfecto, {nombre}! Ya te guardé el lugar para el viaje a {destino} del {fecha} ({asientos}). En un ratito te escribe alguien del equipo para armar todo el pago 🙌';
 
 const tools = [
+  {
+    name: 'abrir_menu_reserva',
+    description: 'Le manda al cliente el menú de reserva de WhatsApp: un botón que abre un formulario donde elige el viaje, las fechas, el precio (con y sin PROMO EFECTIVO), los asientos y carga nombre y DNI, y la reserva se hace sola. Llamala apenas el cliente quiere viajar, sacar, comprar o reservar un pasaje, o pregunta qué viajes o fechas hay para viajar. Después de llamarla no escribas nada: el sistema manda el botón con su texto. Si devuelve que el menú no está disponible, seguí la venta por chat como siempre.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
   {
     name: 'buscar_viajes',
     description: 'Busca los viajes disponibles en el sistema (desde hoy) con su fecha, horario, lugares libres y precios. Llamala SIEMPRE antes de hablar de horarios, fechas, disponibilidad o precios: nunca los respondas de memoria. "texto" filtra por destino, origen o nombre del viaje (ej: "salta", "buenos aires"); vacío trae todos. Por defecto busca 7 días: si piden otra fecha, pasá fechaDesde y fechaHasta (AAAA-MM-DD, como mucho 31 días). Cada viaje es UN sentido (Ida o Vuelta): para ida y vuelta buscá los dos.',
@@ -56,7 +64,8 @@ const tools = [
       properties: {
         nombreContacto: { type: 'string', description: 'Nombre de quien escribe (el que compra)' },
         dniContacto: { type: 'string', description: 'DNI de quien compra, si lo dio' },
-        observaciones: { type: 'string', description: 'Algo que el equipo tenga que saber (ej: viaja con un bebé, quiere pagar en efectivo)' },
+        observaciones: { type: 'string', description: 'Algo que el equipo tenga que saber (ej: viaja con un bebé)' },
+        promoEfectivo: { type: 'boolean', description: 'true si el cliente eligió la PROMO EFECTIVO (solo ida y vuelta): el importe se guarda con la promo' },
         asientos: {
           type: 'array',
           description: 'Un elemento por asiento y por viaje (ida y vuelta de una persona = 2 elementos)',
@@ -166,6 +175,18 @@ async function ejecutar(negocio, clienteId, userId, block, turno, fotos = []) {
     }
   }
 
+  if (block.name === 'abrir_menu_reserva') {
+    if (turno.menu) return 'El menú ya sale en esta respuesta: no escribas nada más.';
+    try {
+      const r = await llamarApi(negocio, '/menuReserva', { userIdChat: userId });
+      if (!r.ok || !r.flowId || !r.flowToken) return 'El menú de reserva no está disponible ahora: seguí la venta por chat como siempre, sin mencionar el menú.';
+      turno.menu = { flowId: r.flowId, flowToken: r.flowToken, pantalla: r.pantalla, encabezado: texto(r.encabezado, 60), cuerpo: texto(r.cuerpo, 1000) || 'Tocá el botón para reservar tu pasaje.', boton: texto(r.boton, 20) || 'Reservar pasaje' };
+      return 'Menú listo: el sistema le manda el botón al cliente. No escribas nada más.';
+    } catch (err) {
+      return errorInterno('abrir el menú de reserva', err);
+    }
+  }
+
   if (block.name === 'reservar_pasajes') {
     if (turno.derivacion) return 'Ya reservaste en esta respuesta: no reserves otra vez.';
     const asientos = Array.isArray(input.asientos) ? input.asientos.slice(0, 10) : [];
@@ -178,6 +199,7 @@ async function ejecutar(negocio, clienteId, userId, block, turno, fotos = []) {
         nombreContacto: texto(input.nombreContacto, 150),
         dniContacto: texto(input.dniContacto, 20),
         observaciones: texto(input.observaciones, 500),
+        promoEfectivo: input.promoEfectivo === true,
         asientos: asientos.map(a => ({
           idViaje: Number(a.idViaje),
           numeroAsiento: Number(a.numeroAsiento),

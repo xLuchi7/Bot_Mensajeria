@@ -95,6 +95,21 @@ async function sendWhatsAppImage(phoneNumberId, to, link, caption) {
   await postWhatsApp(phoneNumberId, to, 'image', { image: caption ? { link, caption } : { link } }, { imagen: link, caption: caption ?? null });
 }
 
+// Menú de WhatsApp Flows (perfil pasajes): botón que abre el formulario del Flow. flow_action data_exchange = la primera pantalla
+// la pide Meta al endpoint del sistema del Cliente (INIT), con el flowToken que armó ese sistema.
+async function sendWhatsAppFlow(phoneNumberId, to, { flowId, flowToken, pantalla, encabezado, cuerpo, boton }) {
+  const interactive = {
+    type: 'flow',
+    body: { text: cuerpo },
+    action: {
+      name: 'flow',
+      parameters: { flow_message_version: '3', flow_id: String(flowId), flow_token: flowToken, flow_cta: boton, flow_action: 'data_exchange' },
+    },
+  };
+  if (encabezado) interactive.header = { type: 'text', text: encabezado };
+  await postWhatsApp(phoneNumberId, to, 'interactive', { interactive }, { flow: flowId, pantalla: pantalla ?? null, texto: cuerpo });
+}
+
 async function sendInstagramMessage(pageId, recipientId, text) {
   try {
     await http.post(
@@ -131,4 +146,4 @@ async function sendWhatsAppTemplate(phoneNumberId, to, nombre, idioma, parametro
   await postWhatsApp(phoneNumberId, to, 'template', { template }, { plantilla: nombre, idioma, parametros });
 }
 
-module.exports = { sendTypingIndicator, sendWhatsAppMessage, sendWhatsAppImage, sendWhatsAppTemplate, sendInstagramMessage, sendFacebookMessage };
+module.exports = { sendTypingIndicator, sendWhatsAppMessage, sendWhatsAppImage, sendWhatsAppFlow, sendWhatsAppTemplate, sendInstagramMessage, sendFacebookMessage };

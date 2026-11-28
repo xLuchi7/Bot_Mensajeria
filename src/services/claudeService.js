@@ -427,7 +427,7 @@ async function generateResponse(clienteId, userId, messages, { fueraDeHorario = 
   const fotos = [];
   const negocio = await cliente.getNegocio(clienteId);
   const checkout = negocio.tipoNegocio === 'pasajes' ? null : await linkCompra.getConfig(clienteId);
-  const turno = { pedidoCreado: false, negocio, derivacion: null, checkout, linkCompra: null };
+  const turno = { pedidoCreado: false, negocio, derivacion: null, menu: null, checkout, linkCompra: null };
   const toolsDelNegocio = toolsDe(negocio, checkout);
   // [prompt fijo con punto de caché, momento actual]: ver momentoActual().
   const systemPrompt = [
@@ -537,6 +537,11 @@ async function generateResponse(clienteId, userId, messages, { fueraDeHorario = 
     if (turno.derivacion) {
       const text = pasajes.mensajeDerivacion(negocio, turno.derivacion);
       return { text, fotos: [], inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null, derivacion: turno.derivacion };
+    }
+
+    // Pasajes: sale el menú de reserva (WhatsApp Flows). Se corta acá: el mensaje es el botón con el texto que armó el sistema.
+    if (turno.menu) {
+      return { text: turno.menu.cuerpo, fotos, inputTokens, outputTokens, costoUsd: costoTotal, escalado, pedidoCreado, consultoPedidos, revisionHumana: null, menu: turno.menu };
     }
   }
 
